@@ -1,4 +1,32 @@
-# Validação executada — 21/10/2026
+# Validação da revisão v1 — 21/10/2026
+
+Worktree `/home/ubuntu/projects/instazap-worktrees/revisao-v1`, branch `fix/revisao-v1`. Execução local em Linux/Python 3.14.5. Configuração global preservada. Esta revisão não executou push, PR, merge ou deploy. Conversão de mídia e controles SSRF de destinos secundários permanecem intactos.
+
+## Resultados desta revisão
+
+Todos os comandos abaixo foram executados em **21/10/2026 (America/Sao_Paulo)**:
+
+| Comando | Resultado real |
+|---|---|
+| `uv sync --frozen` | Criou `.venv`, instalou 48 pacotes do lock; sucesso |
+| `uv run ruff check instazap tests scripts` | `All checks passed!` |
+| `uv run pytest -q` | **102 passed, 1 warning in 43.59s** |
+| `uv run --group browser python scripts/smoke.py --browser` | HTTP PASS e BROWSER PASS; servidor encerrado |
+| `uv run pip-audit -r requirements.txt --disable-pip` | `No known vulnerabilities found` |
+
+O warning continua sendo a depreciação de httpx no TestClient do Starlette. O smoke reutilizou o Chromium em cache, instalou três pacotes do grupo browser e verificou upload sintético → fila persistida → worker → downloads de 60,0 s e 1,2 s → exclusão → 404. No viewport 390×844: duas prévias, decodificação, download, reload e exclusão, sem erros JS ou overflow. Servidor somente em `127.0.0.1:8765`, encerrado pelo script. Capturas locais ignoradas pelo Git.
+
+Os novos testes offline verificam queries/fragmentos de compartilhamento descartados **após** validar a autoridade e o caminho originais, URL canônica no SQLite/fila/subprocesso e na chamada ao extrator, rejeição de portas malformadas/vazias/fora de faixa, credenciais, hosts privados, hosts semelhantes, controles e caminhos codificados. As antigas expectativas de rejeição de query/fragmento foram substituídas: esses componentes são comuns no compartilhamento e não escolhem o destino quando descartados após validação. Os testes de DNS privado/misto, redirects e conexão presa ao IP continuam passando.
+
+O diagnóstico agora recebe do subprocesso limitado somente um token de categoria; o script aceita uma lista fixa de tokens e descarta qualquer saída inesperada. Falhas mostram `NOT VERIFIED: CATEGORIA. Use upload.` e exit code 1, sem URL de origem/CDN, segredos ou traceback. Testes simulam a mensagem real do yt-dlp e saídas/exceções contendo URLs e segredos. Categorias: `LOGIN_REQUIRED_OR_ANONYMOUS_RATE_LIMIT`, `LOGIN_REQUIRED`, `RATE_LIMITED`, `NETWORK_BLOCKED`, `DOWNLOAD_FAILED`, `TIMEOUT`, `PROCESS_FAILED` e `INVALID_URL`. Falhas não reconhecidas continuam genéricas; a categoria não pretende identificar toda causa possível.
+
+**Instagram: download não comprovado.** A observação real independente fornecida pelo operador foi `DownloadError` na chamada direta ao downloader: página redirecionada para login e limite de acesso anônimo excedido. O extrator instalado contém essa mensagem, agora reconhecida como `LOGIN_REQUIRED_OR_ANONYMOUS_RATE_LIMIT`. Esta revisão não repetiu o acesso remoto: a observação é do operador, registrada em 21/10/2026, sem data/hora exata informada para a tentativa. Não foram usados cookies, login ou contorno. Upload manual é o fluxo validado; X continua sem teste público real.
+
+**CI:** os checks acima são locais. Para verificar execução remota, o operador deve abrir a aba Actions do repositório, localizar a execução pelo commit/branch e inspecionar status/logs de lint, pytest, auditoria e build Docker. Esta revisão não executou build Docker nem verificou CI remoto.
+
+O registro anterior abaixo preserva o contexto e os resultados da primeira versão; não representa uma nova execução desses comandos nesta revisão.
+
+## Registro anterior: primeira versão — 21/10/2026
 
 Worktree `primeira-versao`, branch `feat/primeira-versao`. Linux, Python 3.14.5, uv 0.11.16, ffmpeg/ffprobe 6.1.1. Sem alteração de configuração global de modelos, do sistema ou de serviços. Nenhum push, PR, merge ou deploy. Os servidores de teste usaram exclusivamente `127.0.0.1:8765` e foram encerrados.
 
@@ -65,9 +93,9 @@ $ docker --version
 /bin/bash: line 1: docker: command not found
 ```
 
-Auditoria das dependências de **produção** travadas; não audita bibliotecas nativas do sistema/ffmpeg. **Build e execução Docker NÃO TESTADOS** localmente: executável ausente, sem tentar instalar ou iniciar daemon. Dockerfile/Compose foram revisados estaticamente. CI contém build executável, mas não foi acionado remotamente. Python 3.12 da imagem/CI não foi executado neste host (teste nativo usou 3.14.5).
+Auditoria das dependências de **produção** travadas; não audita bibliotecas nativas do sistema/ffmpeg. **Build e execução Docker NÃO TESTADOS** localmente: executável ausente, sem tentar instalar ou iniciar daemon. Dockerfile/Compose foram revisados estaticamente. CI contém build executável; o operador deve conferir a execução do commit desejado na aba Actions, incluindo o log da etapa Docker. Python 3.12 da imagem/CI não foi executado neste host (teste nativo usou 3.14.5).
 
-## Link público: NÃO VERIFICADO
+## Link público: download NÃO VERIFICADO; falha de login/rate limit observada
 
 A skill agent-reach foi consultada e `agent-reach doctor --json` informou backend Instagram indisponível (sem OpenCLI) e X sem autenticação. Não foi configurada nem acessada conta pessoal. Para exercitar o **próprio downloader implementado**, foi usado um exemplo público histórico presente nos testes do extrator InstagramIE instalado; disponibilidade atual desconhecida:
 
@@ -76,7 +104,7 @@ $ uv run python scripts/check_instagram.py https://www.instagram.com/reel/Chunk8
 NOT VERIFIED: link unavailable, network restricted, login required, or extractor blocked. Use upload.
 ```
 
-Exit code 1. Não houve evidência de download bem-sucedido; a mensagem genérica não permite atribuir com precisão a falha a exclusão do post, rede do ambiente, plataforma ou extrator. Não houve tentativa de contornar restrições, usar cookies pessoais ou fornecedor pago. Upload manual continua sendo o caminho validado. **X não teve teste público real.**
+Exit code 1. Esse wrapper original ocultava a causa. No diagnóstico real independente informado pelo operador nesta revisão, a chamada direta `download('https://www.instagram.com/reel/Chunk8-jurw/', temp_path)` retornou `yt_dlp.utils.DownloadError`: a requisição da página foi redirecionada para login e o limite de acesso anônimo foi excedido. Essa é a causa observada para aquela tentativa, não evidência de download bem-sucedido nem prova de indisponibilidade permanente do post. A data/hora exata da tentativa independente não foi informada; a observação foi registrada em 21/10/2026. Não houve tentativa de contornar restrições, usar cookies pessoais ou fornecedor pago. Upload manual continua sendo o caminho validado. **X não teve teste público real.**
 
 ## Limitações restantes
 

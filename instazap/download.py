@@ -7,7 +7,7 @@ from yt_dlp.extractor.instagram import InstagramIE
 from yt_dlp.extractor.twitter import TwitterIE
 from yt_dlp.networking import Request
 
-from .network import RestrictedRH, original_url
+from .network import NetworkBlocked, RestrictedRH, original_url
 
 
 class SafeYDL(YoutubeDL):
@@ -17,7 +17,7 @@ class SafeYDL(YoutubeDL):
 
 
 def download(url, target):
-    original_url(url)
+    url = original_url(url)
     with SafeYDL({'quiet': True, 'no_warnings': True, 'proxy': '', 'socket_timeout': 10,
                   'retries': 0, 'extractor_retries': 0, 'noplaylist': True,
                   'cachedir': False, 'skip_download': True}, auto_init=False) as ydl:
@@ -41,8 +41,33 @@ def download(url, target):
                     output.write(chunk)
 
 
+def failure_category(error):
+    """Inspect extractor text privately; return only fixed, non-sensitive tokens."""
+    message = str(error).lower()
+    login = any(text in message for text in ('redirected to login', 'redirected to the login page',
+                                             'login required'))
+    limited = any(text in message for text in ('rate-limit', 'rate limit', 'too many requests', 'http error 429'))
+    if login and limited:
+        return 'LOGIN_REQUIRED_OR_ANONYMOUS_RATE_LIMIT'
+    if login:
+        return 'LOGIN_REQUIRED'
+    if limited:
+        return 'RATE_LIMITED'
+    if isinstance(error, NetworkBlocked):
+        return 'NETWORK_BLOCKED'
+    return 'DOWNLOAD_FAILED'
+
+
 if __name__ == '__main__':
+    diagnostic = len(sys.argv) == 4 and sys.argv[3] == '--diagnostic'
     try:
         download(sys.argv[1], sys.argv[2])
-    except Exception:
+    except Exception as error:
+        if diagnostic:
+            # Exit successfully so the bounded run wrapper returns this token;
+            # stderr (which may contain extractor URLs) remains captured there.
+            print(failure_category(error))
+            sys.exit(0)
         sys.exit(1)
+    if diagnostic:
+        print('OK')

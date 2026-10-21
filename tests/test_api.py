@@ -4,10 +4,34 @@ import zipfile
 from io import BytesIO
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from instazap.app import create_app
 from instazap.config import Settings
+
+
+@pytest.mark.parametrize(('url', 'canonical'), [
+    ('https://www.instagram.com/reel/ABCDE/?igsh=secret&utm_source=share#fragment',
+     'https://www.instagram.com/reel/ABCDE/'),
+    ('https://x.com/user/status/123456?s=20&t=secret#fragment', 'https://x.com/user/status/123456'),
+])
+def test_post_link_stores_and_downloads_canonical_url(site, monkeypatch, url, canonical, caplog):
+    client, app = site
+    response = client.post('/api/jobs/link', json={'url': url})
+    assert response.status_code == 202
+    job_id = response.json()['id']
+    with app.state.store.db() as db:
+        row = db.execute('SELECT state, url FROM jobs WHERE id=?', (job_id,)).fetchone()
+    assert tuple(row) == ('queued', canonical)
+    calls = []
+    def unavailable(argv, **kwargs):
+        calls.append(argv)
+        raise RuntimeError('offline')
+    monkeypatch.setattr('instazap.worker.run', unavailable)
+    app.state.worker.once()
+    assert calls[0][3] == canonical
+    assert 'secret' not in caplog.text
 
 
 def test_upload_job_download_ownership_delete(site, media):

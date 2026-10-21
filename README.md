@@ -4,7 +4,7 @@ Site pessoal em português para preparar vídeos para o Status. Um host serve a 
 
 **Limites fixos:** entrada de até **240 s e 200.000.000 bytes (200 MB decimais)**; saída de uma a quatro partes ordenadas de até **60 s**. Vídeos acima do limite são rejeitados, nunca encurtados silenciosamente. H.264/AAC em MP4, yuv420p, até 1280×720 ou 720×1280, sem ampliar imagens pequenas nem cortar o enquadramento. O vídeo é convertido para 30 fps; a recodificação é com perdas. Sem áudio na entrada → sem faixa de áudio na saída.
 
-Instagram por yt-dlp primeiro; X usa o mesmo mecanismo, experimental e sem API paga. Apenas publicações públicas com MP4 direto são elegíveis. **Download real de Instagram/X NÃO está verificado neste ambiente.** Upload manual foi validado de ponta a ponta. Não usar para material sem autorização.
+Instagram por yt-dlp primeiro; X usa o mesmo mecanismo, experimental e sem API paga. Apenas publicações públicas com MP4 direto são elegíveis. **Download real de Instagram/X NÃO está verificado neste ambiente.** No diagnóstico independente de Instagram, o yt-dlp retornou `DownloadError`: redirecionamento para login e limite de acesso anônimo (rate limit). Upload manual foi validado de ponta a ponta. Não usar para material sem autorização.
 
 ## Iniciar com Python/uv (Linux)
 
@@ -37,7 +37,7 @@ docker compose logs --tail=100 instazap
 docker compose down
 ```
 
-Volume nomeado `instazap-data` preserva fila, sessão e resultados entre reinícios. **Não executar `docker compose down -v` se quiser preservar esses dados.** A imagem usa UID/GID 10001, sem privilégios; raiz somente leitura, sem capabilities, 1 CPU, memória 1536 MB, 96 processos e /tmp de 64 MB. Em volume bind manual, o diretório precisa ser gravável pelo UID 10001. Docker não estava instalado neste ambiente: build/execução local **não testados**; o workflow CI inclui build, ainda não executado remotamente.
+Volume nomeado `instazap-data` preserva fila, sessão e resultados entre reinícios. **Não executar `docker compose down -v` se quiser preservar esses dados.** A imagem usa UID/GID 10001, sem privilégios; raiz somente leitura, sem capabilities, 1 CPU, memória 1536 MB, 96 processos e /tmp de 64 MB. Em volume bind manual, o diretório precisa ser gravável pelo UID 10001. Docker não estava instalado neste ambiente: build/execução local **não testados**; o workflow CI inclui build. Confira o resultado da execução correspondente ao commit na aba Actions do repositório.
 
 ## Uso
 
@@ -48,12 +48,12 @@ Volume nomeado `instazap-data` preserva fila, sessão e resultados entre reiníc
 
 Cookies apagados, outro navegador ou expiração da sessão impedem recuperar o acesso. Sessão dura sete dias; ela não é uma conta nem permite recuperação de senha. O horário exibido acompanha o fuso do navegador.
 
-URLs aceitas (sem query, fragmento, credenciais ou porta):
+URLs aceitas (HTTPS, hosts exatos permitidos, sem credenciais ou porta):
 
 - `https://www.instagram.com/reel/CODIGO/`, `/reels/CODIGO/` ou `/p/CODIGO/`;
 - `https://x.com/usuario/status/ID` (também `twitter.com`).
 
-Remova `?igsh=...` e outros parâmetros. Perfis, Stories, lives, carrosséis, páginas arbitrárias, playlists HLS/DASH e formatos de vídeo/áudio separados são recusados. Conteúdo pode estar indisponível, bloqueado no datacenter ou exigir login; nesses casos a interface oferece **Enviar arquivo**. Não forneça senhas/cookies de Instagram ou X. O código não usa sessões pessoais do navegador nem mecanismos de contorno.
+Parâmetros de compartilhamento como `?igsh=...`, `?utm_source=...`, `?s=...` e `?t=...`, além de fragmentos, são aceitos e descartados após validar a URL original. Apenas a URL canônica HTTPS sem query/fragmento segue para a fila e o downloader; parâmetros não são registrados em logs. Perfis, Stories, lives, carrosséis, páginas arbitrárias, playlists HLS/DASH e formatos de vídeo/áudio separados são recusados. Conteúdo pode estar indisponível, bloqueado no datacenter ou exigir login; nesses casos a interface oferece **Enviar arquivo**. Não forneça senhas/cookies de Instagram ou X. O código não usa sessões pessoais do navegador nem mecanismos de contorno.
 
 ## Arquitetura e recursos
 
@@ -104,11 +104,12 @@ uv export --no-dev --no-emit-project --format requirements-txt --output-file req
 uv run pip-audit -r requirements.txt --disable-pip
 # Somente para uma publicação pública própria ou autorizada:
 uv run python scripts/check_instagram.py 'https://www.instagram.com/reel/CODIGO/'
+# Falhas do diagnóstico mostram somente uma categoria fixa, sem URLs ou traceback.
 # Se Docker estiver disponível:
 docker build -t instazap:local .
 ```
 
-Os scripts smoke usam temporários, iniciam somente `127.0.0.1:8765` e encerram o servidor ao finalizar. Recusam usar a porta se já ocupada. `artifacts/mobile.png` e `desktop.png` são capturas locais ignoradas pelo Git. Veja [docs/validacao.md](docs/validacao.md) para comandos, resultados e lacunas desta entrega. CI executa pytest, lint, auditoria e build Docker; nenhum push foi feito para dispará-la.
+Os scripts smoke usam temporários, iniciam somente `127.0.0.1:8765` e encerram o servidor ao finalizar. Recusam usar a porta se já ocupada. `artifacts/mobile.png` e `desktop.png` são capturas locais ignoradas pelo Git. Veja [docs/validacao.md](docs/validacao.md) para comandos, resultados e lacunas desta entrega. O workflow CI está configurado para executar pytest, lint, auditoria e build Docker em push/PR. Para verificar o CI, abra a aba Actions do repositório, selecione a execução do commit/branch desejado e confira o status e os logs de cada etapa; checks locais não comprovam execução remota.
 
 ## Mapa dos arquivos
 

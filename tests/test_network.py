@@ -14,12 +14,27 @@ from instazap.network import (BoundedResponse, Budget, NetworkBlocked, Restricte
 @pytest.mark.parametrize('url', [
     'http://www.instagram.com/reel/ABCDE/', 'https://127.0.0.1/reel/ABCDE/',
     'https://instagram.com.evil.test/reel/ABCDE/', 'https://instagram.com@127.0.0.1/reel/ABCDE/',
-    'https://www.instagram.com:443/reel/ABCDE/', 'https://www.instagram.com/reel/ABCDE/?x=1',
+    'https://www.instagram.com:443/reel/ABCDE/',
     'https://www.instagram.com/stories/ABCDE/', 'https://www.instagram.com/user/',
-    'https://www.instagram.com/reel/ABCDE/#fragment', 'https://x.com/user/status/notanumber',
+    'https://x.com/user/status/notanumber',
     'https://www.instagram.com/reel/../../etc/passwd', 'file:///etc/passwd',
     'https://[::1]/', 'https://169.254.169.254/', 'https://2130706433/',
     'https://www.instagram.com\\@evil.test/reel/ABCDE/', '', None,
+    'https://www.instagram.com:bad/reel/ABCDE/?igsh=123',
+    'https://www.instagram.com:99999/reel/ABCDE/?igsh=123',
+    'https://www.instagram.com:/reel/ABCDE/?igsh=123',
+    'https://www.instagram.com:0/reel/ABCDE/?igsh=123',
+    'https://@www.instagram.com/reel/ABCDE/?igsh=123',
+    'https://user:secret@www.instagram.com/reel/ABCDE/?igsh=123',
+    'https://10.0.0.1/reel/ABCDE/?igsh=123',
+    'https://www.instagram.com.evil.test/reel/ABCDE/?igsh=123',
+    'https://www.instagram.com/reel/%41BCDE/?igsh=123',
+    'https://www.instagram.com/reel/ABCDE/%2e%2e/?igsh=123',
+    'https://www.instagram.com/reel/ABCDE%2f..%2f/?igsh=123',
+    'https://x.com/user/status/12345%3f?s=20',
+    'https://www.insta\ngram.com/reel/ABCDE/?igsh=123',
+    ' https://www.instagram.com/reel/ABCDE/?igsh=123',
+    'https://www.instagram.com/reel/ABCDE/?igsh=%ZZ',
 ])
 def test_original_allowlist(url):
     with pytest.raises(ValueError):
@@ -30,6 +45,20 @@ def test_original_allowlist(url):
                                 'https://instagram.com/p/ABCDE123', 'https://x.com/user/status/123456'])
 def test_valid_original(url):
     assert original_url(url) == url
+
+
+@pytest.mark.parametrize(('url', 'canonical'), [
+    ('https://www.instagram.com/reel/ABCDE/?igsh=abc&utm_source=share#fragment',
+     'https://www.instagram.com/reel/ABCDE/'),
+    ('https://instagram.com/p/ABCDE?x=1', 'https://instagram.com/p/ABCDE'),
+    ('https://www.instagram.com/reel/ABCDE/#fragment', 'https://www.instagram.com/reel/ABCDE/'),
+    ('https://X.COM/user/status/123456?s=20&t=abc#fragment', 'https://x.com/user/status/123456'),
+    ('https://twitter.com/user/status/123456/?utm_medium=social', 'https://twitter.com/user/status/123456/'),
+])
+def test_share_url_normalized(url, canonical):
+    # Tracking queries/fragments are ordinary share links, not SSRF destinations.
+    # They used to be rejected; discard them only after authority/path validation.
+    assert original_url(url) == canonical
 
 
 @pytest.mark.parametrize('ip', ['127.0.0.1', '10.0.0.1', '169.254.169.254', '100.100.100.200',

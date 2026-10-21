@@ -20,14 +20,25 @@ class NetworkBlocked(RequestError):
 def original_url(url):
     if not isinstance(url, str) or len(url) > 500:
         raise ValueError('Cole um link de publicação do Instagram ou X.')
-    p = urlsplit(url)
-    if p.scheme != 'https' or p.username or p.password or p.port or p.fragment or p.query:
-        raise ValueError('Use o link HTTPS da publicação, sem parâmetros (remova tudo após ?).')
+    # urlsplit silently strips some whitespace/control characters. Reject the raw
+    # input first, rather than turning a malformed URL into an allowed one.
+    if re.search(r'[\s\x00-\x1f\x7f\\]', url) or re.search(r'%(?![0-9A-Fa-f]{2})', url):
+        raise ValueError('Link malformado.')
+    try:
+        p = urlsplit(url)
+        port = p.port
+    except ValueError:
+        raise ValueError('Link malformado.') from None
+    if (p.scheme != 'https' or not p.hostname or p.username is not None
+            or p.password is not None or port is not None or p.netloc.lower() != p.hostname):
+        raise ValueError('Use o link HTTPS da publicação, sem credenciais ou porta.')
     instagram = p.hostname in ('instagram.com', 'www.instagram.com') and re.fullmatch(r'/(?:p|reel|reels)/[A-Za-z0-9_-]{5,64}/?', p.path)
     twitter = p.hostname in ('x.com', 'www.x.com', 'twitter.com', 'www.twitter.com') and re.fullmatch(r'/[A-Za-z0-9_]{1,15}/status/[0-9]{5,25}/?', p.path)
     if not (instagram or twitter):
         raise ValueError('Aceitamos apenas links de uma publicação /reel/ ou /p/ do Instagram ou /usuário/status/id do X.')
-    return url
+    # Only discard tracking parameters/fragments after validating the original
+    # authority and exact publication path; never unquote or normalize the path.
+    return f'https://{p.hostname}{p.path}'
 
 
 def destination(url):
