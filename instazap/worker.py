@@ -1,10 +1,14 @@
 import json
+import logging
 import threading
 import time
 import zipfile
 
 from .media import split
 from .process import run
+
+
+logger = logging.getLogger(__name__)
 
 
 class Worker:
@@ -27,6 +31,7 @@ class Worker:
         folder = self.store.files / job['id']
         source = folder / 'source'
         terminal = False
+        stage = 'download' if job['kind'] == 'link' else 'split'
         try:
             if job['kind'] == 'link':
                 # URL is not written to logs or retained after completion.
@@ -36,7 +41,10 @@ class Worker:
                         file_limit=self.store.settings.max_bytes, cancel=self.cancel)
                 except Exception as exc:
                     raise ValueError('Não foi possível obter este link público (bloqueio, login ou formato indisponível). Use “Enviar arquivo”.') from exc
-            parts = split(source, folder, lambda i, n: self.store.update(job['id'], progress=10 + int(i / n * 80)), cancel=self.cancel)
+            stage = 'split'
+            parts = split(source, folder, lambda i, n: self.store.update(job['id'], progress=10 + int(i / n * 80)), cancel=self.cancel,
+                          first_part_seconds=job['first_part_seconds'])
+            stage = 'archive'
             with zipfile.ZipFile(folder / 'partes.zip', 'w', compression=zipfile.ZIP_STORED) as archive:
                 for part in parts:
                     archive.write(folder / part['name'], part['name'])
@@ -44,6 +52,8 @@ class Worker:
                               expires=time.time() + self.store.settings.ttl)
             terminal = True
         except Exception as exc:
+            # Only controlled stage/type fields: never exception text, URLs or paths.
+            logger.warning('worker stage=%s failure=%s', stage, type(exc).__name__)
             message = str(exc) if isinstance(exc, ValueError) else 'Não foi possível processar este vídeo. Tente enviar outro arquivo.'
             if self.stop.is_set():
                 self.store.update(job['id'], state='queued', progress=0)

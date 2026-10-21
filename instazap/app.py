@@ -12,6 +12,7 @@ from starlette.requests import ClientDisconnect
 
 from .config import Settings
 from .network import original_url
+from .media import validate_first_part
 from .store import Busy, Store
 from .worker import Worker
 
@@ -116,18 +117,22 @@ def create_app(settings=None):
         try:
             data = json.loads(body)
             url = original_url(data.get('url'))
+            first_part_seconds = validate_first_part(data.get('first_part_seconds', 60))
         except (ValueError, AttributeError) as exc:
             raise HTTPException(400, str(exc)) from exc
         try:
-            job_id = store.create(owner(request), 'link', url)
+            job_id = store.create(owner(request), 'link', url, first_part_seconds=first_part_seconds)
         except Busy as exc:
             raise HTTPException(429, str(exc)) from exc
         return {'id': job_id}
 
     @app.post('/api/jobs/upload', status_code=202)
     async def upload(request: Request):
+        raw = request.headers.get('x-first-part-seconds', '60')
+        if raw not in ('30', '60'):
+            raise HTTPException(400, 'A primeira parte deve ter 30 ou 60 segundos.')
         try:
-            job_id = store.create(owner(request), 'upload')
+            job_id = store.create(owner(request), 'upload', first_part_seconds=int(raw))
         except Busy as exc:
             raise HTTPException(429, str(exc)) from exc
         source = store.files / job_id / 'source'

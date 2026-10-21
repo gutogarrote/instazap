@@ -43,6 +43,7 @@ def test_upload_job_download_ownership_delete(site, media):
     assert app.state.worker.once()
     job = client.get(f'/api/jobs/{job_id}').json()
     assert job['state'] == 'ready', job
+    assert job['first_part_seconds'] == 60
     assert len(job['parts']) == 1
     path = f"/api/jobs/{job_id}/files/{job['parts'][0]['name']}"
     file = client.get(path)
@@ -162,14 +163,17 @@ def test_real_new_app_restart(tmp_path, media):
     with TestClient(first) as client:
         csrf = client.get('/api/session').json()['csrf']
         cookies = dict(client.cookies)
-        job_id = client.post('/api/jobs/upload', content=media(1).read_bytes(),
-                             headers={'x-csrf-token':csrf}).json()['id']
+        job_id = client.post('/api/jobs/upload', content=media(60).read_bytes(),
+                             headers={'x-csrf-token':csrf, 'x-first-part-seconds':'30'}).json()['id']
         assert first.state.store.claim()['id'] == job_id
     second = create_app(config)
     with TestClient(second, cookies=cookies) as client:
         assert client.get(f'/api/jobs/{job_id}').json()['state'] == 'queued'
         second.state.worker.once()
-        assert client.get(f'/api/jobs/{job_id}').json()['state'] == 'ready'
+        job = client.get(f'/api/jobs/{job_id}').json()
+        assert job['state'] == 'ready'
+        assert job['first_part_seconds'] == 30
+        assert [p['duration'] for p in job['parts']] == [30, 30]
     third = create_app(config)
     with TestClient(third, cookies=cookies) as client:
         job = client.get(f'/api/jobs/{job_id}').json()
@@ -195,7 +199,7 @@ def test_delete_processing_cancels_and_leaves_no_files(site, media, monkeypatch)
     client, app = site
     job_id = client.post('/api/jobs/upload', content=media(1).read_bytes()).json()['id']
     started = threading.Event()
-    def long_split(source, folder, progress, cancel):
+    def long_split(source, folder, progress, cancel, first_part_seconds):
         started.set()
         assert cancel.wait(5)
         raise RuntimeError('cancelled')
@@ -215,7 +219,7 @@ def test_graceful_shutdown_requeues_instead_of_failing(site, media, monkeypatch)
     client, app = site
     job_id = client.post('/api/jobs/upload', content=media(1).read_bytes()).json()['id']
     started = threading.Event()
-    def long_split(source, folder, progress, cancel):
+    def long_split(source, folder, progress, cancel, first_part_seconds):
         started.set()
         assert cancel.wait(5)
         raise RuntimeError('shutdown')
@@ -229,3 +233,98 @@ def test_graceful_shutdown_requeues_instead_of_failing(site, media, monkeypatch)
     assert not task.is_alive()
     assert client.get(f'/api/jobs/{job_id}').json()['state'] == 'queued'
     assert (app.state.store.files / job_id / 'source').exists()
+
+
+@pytest.mark.parametrize('value', [0, -30, 30.5, 30.0, '30', None, True, 90, {}, []])
+def test_link_first_part_validation(site, value):
+    client, app = site
+    response = client.post('/api/jobs/link', json={
+        'url':'https://www.instagram.com/reel/ABCDE/', 'first_part_seconds':value})
+    assert response.status_code == 400
+    assert '30 ou 60' in response.json()['detail']
+    assert client.get('/api/jobs').json() == []
+
+
+@pytest.mark.parametrize('value', ['0', '-30', '30.5', '30.0', 'invalid', '', '90', ' 30'])
+def test_upload_first_part_validation(site, value):
+    client, app = site
+    response = client.post('/api/jobs/upload', content=b'x', headers={'x-first-part-seconds':value})
+    assert response.status_code == 400
+    assert '30 ou 60' in response.json()['detail']
+    assert client.get('/api/jobs').json() == []
+    assert not list(app.state.store.files.iterdir())
+
+
+@pytest.mark.parametrize('first', [30, 60])
+def test_link_choice_reaches_real_worker(site, media, monkeypatch, first):
+    client, app = site
+    def synthetic_download(argv, **kwargs):
+        # Test fixture replaces only the network operation, never extraction evidence.
+        from pathlib import Path
+        Path(argv[4]).write_bytes(media(60).read_bytes())
+    monkeypatch.setattr('instazap.worker.run', synthetic_download)
+    job_id = client.post('/api/jobs/link', json={
+        'url':'https://x.com/user/status/123456', 'first_part_seconds':first}).json()['id']
+    app.state.store.recover()
+    assert app.state.worker.once()
+    job = client.get(f'/api/jobs/{job_id}').json()
+    assert job['state'] == 'ready', job
+    assert job['first_part_seconds'] == first
+    assert [p['duration'] for p in job['parts']] == ([30, 30] if first == 30 else [60])
+
+
+def test_old_database_migration_preserves_jobs_and_defaults(tmp_path):
+    import sqlite3
+    from instazap.store import Store
+    with sqlite3.connect(tmp_path / 'queue.sqlite3') as db:
+        db.execute("""CREATE TABLE jobs (id TEXT PRIMARY KEY, owner TEXT NOT NULL,
+                   state TEXT NOT NULL, created REAL NOT NULL, expires REAL NOT NULL,
+                   kind TEXT NOT NULL, url TEXT, progress INTEGER DEFAULT 0,
+                   error TEXT, parts TEXT DEFAULT '[]')""")
+        db.execute("INSERT INTO jobs(id,owner,state,created,expires,kind) VALUES ('old','owner','queued',1,?,'link')",
+                   (time.time() + 1000,))
+        db.execute('''INSERT INTO jobs(id,owner,state,created,expires,kind,parts)
+                   VALUES ('ready','owner','ready',1,?,'upload','[{"name":"existing.mp4"}]')''',
+                   (time.time() + 1000,))
+    config = Settings(data=tmp_path, worker=False)
+    store = Store(config)
+    assert store.get('old', 'owner')['first_part_seconds'] == 60
+    ready = store.get('ready', 'owner')
+    assert ready['state'] == 'ready' and ready['first_part_seconds'] == 60
+    assert ready['parts'] == '[{"name":"existing.mp4"}]'
+    assert Store(config).claim()['first_part_seconds'] == 60  # Migration is idempotent.
+    store.recover()
+    assert store.claim()['id'] == 'old'
+
+
+def test_queued_jobs_keep_independent_choices(site, media):
+    client, app = site
+    other = TestClient(app)
+    other.headers['x-csrf-token'] = other.get('/api/session').json()['csrf']
+    ids = []
+    for session, first in [(client, 30), (other, 60)]:
+        ids.append(session.post('/api/jobs/upload', content=media(60).read_bytes(),
+                                headers={'x-first-part-seconds':str(first)}).json()['id'])
+    app.state.store.recover()
+    assert app.state.worker.once() and app.state.worker.once()
+    for session, job_id, durations in [(client, ids[0], [30, 30]), (other, ids[1], [60])]:
+        job = session.get(f'/api/jobs/{job_id}').json()
+        assert job['state'] == 'ready'
+        assert [p['duration'] for p in job['parts']] == durations
+
+
+def test_processing_failure_logs_stage_and_removes_media(site, media, monkeypatch, caplog):
+    client, app = site
+    job_id = client.post('/api/jobs/upload', content=media(1).read_bytes()).json()['id']
+
+    def failure(*args, **kwargs):
+        raise RuntimeError('https://private.invalid/?token=secret /private/source.mp4')
+
+    monkeypatch.setattr('instazap.worker.split', failure)
+    assert app.state.worker.once()
+    job = client.get(f'/api/jobs/{job_id}').json()
+    assert job['state'] == 'error'
+    assert not list((app.state.store.files / job_id).iterdir())
+    assert 'worker stage=split failure=RuntimeError' in caplog.text
+    assert 'private' not in caplog.text and 'secret' not in caplog.text
+    assert 'private' not in job['error']
