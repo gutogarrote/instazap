@@ -311,3 +311,20 @@ def test_queued_jobs_keep_independent_choices(site, media):
         job = session.get(f'/api/jobs/{job_id}').json()
         assert job['state'] == 'ready'
         assert [p['duration'] for p in job['parts']] == durations
+
+
+def test_processing_failure_logs_stage_and_removes_media(site, media, monkeypatch, caplog):
+    client, app = site
+    job_id = client.post('/api/jobs/upload', content=media(1).read_bytes()).json()['id']
+
+    def failure(*args, **kwargs):
+        raise RuntimeError('https://private.invalid/?token=secret /private/source.mp4')
+
+    monkeypatch.setattr('instazap.worker.split', failure)
+    assert app.state.worker.once()
+    job = client.get(f'/api/jobs/{job_id}').json()
+    assert job['state'] == 'error'
+    assert not list((app.state.store.files / job_id).iterdir())
+    assert 'worker stage=split failure=RuntimeError' in caplog.text
+    assert 'private' not in caplog.text and 'secret' not in caplog.text
+    assert 'private' not in job['error']

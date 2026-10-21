@@ -4,7 +4,7 @@ Site pessoal em português para preparar vídeos para o Status. Um host serve a 
 
 **Limites fixos:** entrada de até **240 s e 200.000.000 bytes (200 MB decimais)**; saída ordenada com primeira parte de **30 ou 60 s** (padrão **60 s**) e demais partes de até **60 s**. Com primeira de 30 s, podem ser necessárias **cinco partes** para preservar os 240 s. Vídeos acima do limite são rejeitados, nunca encurtados silenciosamente. H.264/AAC em MP4, yuv420p, até 1280×720 ou 720×1280, sem ampliar imagens pequenas nem cortar o enquadramento. O vídeo é convertido para 30 fps; a recodificação é com perdas. Sem áudio na entrada → sem faixa de áudio na saída.
 
-Instagram por yt-dlp primeiro; X usa o mesmo mecanismo, experimental e sem API paga. Apenas publicações públicas com MP4 direto são elegíveis. **Download real de Instagram/X NÃO está verificado neste ambiente.** No diagnóstico independente de Instagram, o yt-dlp retornou `DownloadError`: redirecionamento para login e limite de acesso anônimo (rate limit). Upload manual foi validado de ponta a ponta. Não usar para material sem autorização.
+Instagram por yt-dlp primeiro; X usa o mesmo mecanismo, experimental e sem API paga. Apenas publicações públicas com MP4 direto são elegíveis. **Um link real de Instagram foi baixado com sucesso no diagnóstico do operador/Hermes e o arquivo foi processado e decodificado localmente com primeira parte de 30 e 60 s.** Isso comprova esse caso, sem garantir disponibilidade de outros links; tentativas anteriores encontraram login/rate limit. X continua sem validação real. Upload manual foi validado de ponta a ponta. Não usar para material sem autorização.
 
 ## Primeira parte e acompanhamento
 
@@ -17,7 +17,7 @@ O formulário de link aparece primeiro, seguido do upload manual. O controle com
 | 120 s | 30 + 60 + 30 | 60 + 60 |
 | 240 s | 30 + 60 + 60 + 60 + 30 | 60 + 60 + 60 + 60 |
 
-O restante final é preservado. O limite de entrada continua 240 s/200 MB; selecionar 30 s não permite entradas maiores. A escolha fica em `jobs.first_part_seconds` no SQLite e acompanha cada tarefa até o worker, inclusive após reinício. Bancos antigos recebem migração aditiva com padrão 60, preservando tarefas e resultados existentes.
+O restante final é preservado. Finais diferentes de áudio/vídeo são medidos pelos quadros e amostras de apresentação, sem tratar duração inflada de pacote AAC como conteúdo perdido. Quando o áudio continua, o último quadro pode ser prolongado; os tetos de cada parte continuam estritos. A causa e a validação real estão em [docs/validacao.md](docs/validacao.md). O limite de entrada continua 240 s/200 MB; selecionar 30 s não permite entradas maiores. A escolha fica em `jobs.first_part_seconds` no SQLite e acompanha cada tarefa até o worker, inclusive após reinício. Bancos antigos recebem migração aditiva com padrão 60, preservando tarefas e resultados existentes.
 
 Na API, `POST /api/jobs/link` recebe JSON como `{"url":"https://www.instagram.com/reel/CODIGO/","first_part_seconds":30}`. `POST /api/jobs/upload` continua recebendo **corpo binário bruto**, com header `X-First-Part-Seconds: 30`. Omitir o campo/header usa 60. O JSON aceita somente os inteiros 30 ou 60; o header aceita somente `30` ou `60`. Valores inválidos são rejeitados com 400 antes de criar a tarefa. Sessão, CSRF, origem e demais proteções continuam obrigatórios.
 
@@ -104,7 +104,7 @@ Os logs de acesso são desativados nos comandos de execução. URLs originais s�
 
 ## Testar
 
-Todos os vídeos de teste são **sintéticos**, gerados localmente por ffmpeg; não são evidência de downloads de redes sociais. Não são usados APIs pagos nem rede nos testes pytest.
+Todos os vídeos da suíte automatizada são **sintéticos**, gerados localmente por ffmpeg; não são evidência de downloads de redes sociais. A validação privada adicional usou o arquivo real descrito acima, sem incluir mídia, URL ou artefatos no repositório/CI. Não são usados APIs pagos nem rede nos testes pytest.
 
 ```bash
 uv sync --frozen
