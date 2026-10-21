@@ -2,9 +2,24 @@
 
 Site pessoal em português para preparar vídeos para o Status. Um host serve a página, a API e os arquivos. Sem serviços pagos, conta cloud, API do X, banco externo ou build JavaScript.
 
-**Limites fixos:** entrada de até **240 s e 200.000.000 bytes (200 MB decimais)**; saída de uma a quatro partes ordenadas de até **60 s**. Vídeos acima do limite são rejeitados, nunca encurtados silenciosamente. H.264/AAC em MP4, yuv420p, até 1280×720 ou 720×1280, sem ampliar imagens pequenas nem cortar o enquadramento. O vídeo é convertido para 30 fps; a recodificação é com perdas. Sem áudio na entrada → sem faixa de áudio na saída.
+**Limites fixos:** entrada de até **240 s e 200.000.000 bytes (200 MB decimais)**; saída ordenada com primeira parte de **30 ou 60 s** (padrão **60 s**) e demais partes de até **60 s**. Com primeira de 30 s, podem ser necessárias **cinco partes** para preservar os 240 s. Vídeos acima do limite são rejeitados, nunca encurtados silenciosamente. H.264/AAC em MP4, yuv420p, até 1280×720 ou 720×1280, sem ampliar imagens pequenas nem cortar o enquadramento. O vídeo é convertido para 30 fps; a recodificação é com perdas. Sem áudio na entrada → sem faixa de áudio na saída.
 
 Instagram por yt-dlp primeiro; X usa o mesmo mecanismo, experimental e sem API paga. Apenas publicações públicas com MP4 direto são elegíveis. **Download real de Instagram/X NÃO está verificado neste ambiente.** No diagnóstico independente de Instagram, o yt-dlp retornou `DownloadError`: redirecionamento para login e limite de acesso anônimo (rate limit). Upload manual foi validado de ponta a ponta. Não usar para material sem autorização.
+
+## Primeira parte e acompanhamento
+
+O formulário de link aparece primeiro, seguido do upload manual. O controle compartilhado “Primeira parte” vale para os dois caminhos. Ao enviar, “Aguarde… recebendo o link/o arquivo” aparece antes da resposta HTTP, com status acessível e ações bloqueadas durante a requisição. Fila, processamento e resultados ficam logo após os controles, antes de “Como funciona”. Falhas liberam as ações; o polling preserva prévias existentes e não força rolagem.
+
+| Entrada | Primeira de 30 s | Primeira de 60 s (padrão) |
+|---|---|---|
+| Até 30 s | Uma parte, duração original | Uma parte, duração original |
+| 60 s | 30 + 30 | 60 |
+| 120 s | 30 + 60 + 30 | 60 + 60 |
+| 240 s | 30 + 60 + 60 + 60 + 30 | 60 + 60 + 60 + 60 |
+
+O restante final é preservado. O limite de entrada continua 240 s/200 MB; selecionar 30 s não permite entradas maiores. A escolha fica em `jobs.first_part_seconds` no SQLite e acompanha cada tarefa até o worker, inclusive após reinício. Bancos antigos recebem migração aditiva com padrão 60, preservando tarefas e resultados existentes.
+
+Na API, `POST /api/jobs/link` recebe JSON como `{"url":"https://www.instagram.com/reel/CODIGO/","first_part_seconds":30}`. `POST /api/jobs/upload` continua recebendo **corpo binário bruto**, com header `X-First-Part-Seconds: 30`. Omitir o campo/header usa 60. O JSON aceita somente os inteiros 30 ou 60; o header aceita somente `30` ou `60`. Valores inválidos são rejeitados com 400 antes de criar a tarefa. Sessão, CSRF, origem e demais proteções continuam obrigatórios.
 
 ## Iniciar com Python/uv (Linux)
 
@@ -109,7 +124,7 @@ uv run python scripts/check_instagram.py 'https://www.instagram.com/reel/CODIGO/
 docker build -t instazap:local .
 ```
 
-Os scripts smoke usam temporários, iniciam somente `127.0.0.1:8765` e encerram o servidor ao finalizar. Recusam usar a porta se já ocupada. `artifacts/mobile.png` e `desktop.png` são capturas locais ignoradas pelo Git. Veja [docs/validacao.md](docs/validacao.md) para comandos, resultados e lacunas desta entrega. O workflow CI está configurado para executar pytest, lint, auditoria e build Docker em push/PR. Para verificar o CI, abra a aba Actions do repositório, selecione a execução do commit/branch desejado e confira o status e os logs de cada etapa; checks locais não comprovam execução remota.
+Os scripts smoke usam temporários, iniciam por padrão somente `127.0.0.1:8766` (`--port` permite outra porta local) e encerram o servidor ao finalizar. Recusam usar a porta se já ocupada. `artifacts/mobile.png` e `desktop.png` são capturas locais ignoradas pelo Git. Veja [docs/validacao.md](docs/validacao.md) para comandos, resultados e lacunas desta entrega. O workflow CI está configurado para executar pytest, lint, auditoria e build Docker em push/PR. Para verificar o CI, abra a aba Actions do repositório, selecione a execução do commit/branch desejado e confira o status e os logs de cada etapa; checks locais não comprovam execução remota.
 
 ## Mapa dos arquivos
 

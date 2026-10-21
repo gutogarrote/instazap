@@ -36,7 +36,8 @@ class Worker:
                         file_limit=self.store.settings.max_bytes, cancel=self.cancel)
                 except Exception as exc:
                     raise ValueError('Não foi possível obter este link público (bloqueio, login ou formato indisponível). Use “Enviar arquivo”.') from exc
-            parts = split(source, folder, lambda i, n: self.store.update(job['id'], progress=10 + int(i / n * 80)), cancel=self.cancel)
+            parts = split(source, folder, lambda i, n: self.store.update(job['id'], progress=10 + int(i / n * 80)), cancel=self.cancel,
+                          first_part_seconds=job['first_part_seconds'])
             with zipfile.ZipFile(folder / 'partes.zip', 'w', compression=zipfile.ZIP_STORED) as archive:
                 for part in parts:
                     archive.write(folder / part['name'], part['name'])

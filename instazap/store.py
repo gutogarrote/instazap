@@ -6,6 +6,8 @@ import sqlite3
 import time
 from contextlib import contextmanager
 
+from .media import validate_first_part
+
 
 class Busy(ValueError):
     pass
@@ -28,6 +30,12 @@ class Store:
               error TEXT, parts TEXT DEFAULT '[]');
             CREATE INDEX IF NOT EXISTS owner_index ON jobs(owner);
             ''')
+
+            # Additive migration: old jobs keep the original 60-second behavior.
+            db.execute('BEGIN IMMEDIATE')
+            if 'first_part_seconds' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN first_part_seconds INTEGER NOT NULL DEFAULT 60 '
+                           'CHECK(first_part_seconds IN (30,60))')
 
     @contextmanager
     def db(self):
@@ -56,7 +64,8 @@ class Store:
             db.execute('INSERT INTO sessions VALUES (?,?)', (self.digest(token), time.time() + 7 * 86400))
         return token
 
-    def create(self, owner, kind, url=None):
+    def create(self, owner, kind, url=None, first_part_seconds=60):
+        validate_first_part(first_part_seconds)
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             if db.execute("SELECT count(*) FROM jobs WHERE owner=? AND state IN ('receiving','queued','processing')", (owner,)).fetchone()[0]:
@@ -70,9 +79,9 @@ class Store:
                 raise Busy('Armazenamento ou fila cheia. Exclua arquivos antigos ou tente mais tarde.')
             job_id = secrets.token_hex(16)
             now = time.time()
-            db.execute('INSERT INTO jobs(id,owner,state,created,expires,kind,url) VALUES (?,?,?,?,?,?,?)',
+            db.execute('INSERT INTO jobs(id,owner,state,created,expires,kind,url,first_part_seconds) VALUES (?,?,?,?,?,?,?,?)',
                        (job_id, owner, 'receiving' if kind == 'upload' else 'queued', now,
-                        now + self.settings.ttl, kind, url))
+                        now + self.settings.ttl, kind, url, first_part_seconds))
             (self.files / job_id).mkdir(mode=0o700)
         return job_id
 

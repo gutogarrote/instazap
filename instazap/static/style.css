@@ -594,3 +594,16 @@ footer>span {
     transition:none!important
   }
 }
+
+/* Keep controls, current status and results ahead of the instructions at every width. */
+.workspace { display:block; max-width:760px; }
+.results { margin-top:24px; }
+#first-part-control { border:0; padding:0; margin:0 0 24px; min-width:0; }
+#first-part-control legend { font-size:13px; font-weight:650; margin-bottom:10px; }
+.duration-options { display:flex; gap:16px; flex-wrap:wrap; }
+.duration-options label { display:flex; align-items:center; gap:6px; margin:0; }
+.duration-options input[type=radio] { width:auto; accent-color:var(--green); }
+#submission-status { display:flex; gap:10px; align-items:center; margin:18px 0; font-size:14px; line-height:1.6; }
+.spinner { width:18px; height:18px; flex-shrink:0; border:2px solid var(--border); border-top-color:var(--green); border-radius:50%; animation:spin 1s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+@media(prefers-reduced-motion:reduce) { .spinner { animation:none; } }

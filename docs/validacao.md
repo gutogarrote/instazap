@@ -1,4 +1,40 @@
-# Validação da revisão v1 — 21/10/2026
+# Validação: primeira parte e feedback — 21/10/2026
+
+Worktree `primeira-parte-e-feedback`, branch `feat/primeira-parte-e-feedback`, a partir do último `origin/main` consultado (`770f82f`). Execução nesta sessão compartilhada, sem alteração de configuração global, infraestrutura ou serviços. Nenhum push, PR, merge de publicação ou deploy. Preview ativo em 8765 preservado; smoke isolado em `127.0.0.1:8766`, encerrado pelo próprio script.
+
+## Resultados atuais
+
+| Comando executado | Resultado |
+|---|---|
+| `uv sync --frozen` | Sucesso com o lock existente |
+| `uv run ruff check instazap tests scripts` | All checks passed! |
+| `uv run pytest -q` | **140 passed, 1 warning in 80.21s** |
+| `uv run --group browser python scripts/smoke.py --browser` | HTTP PASS e BROWSER PASS; servidor encerrado |
+| `uv run pip-audit -r requirements.txt --disable-pip` | No known vulnerabilities found |
+
+O warning é a depreciação já existente de httpx no TestClient do Starlette. Chromium em cache reutilizado; nenhuma instalação de navegador. Capturas locais em `artifacts/mobile.png` e `artifacts/desktop.png`, ignoradas pelo Git, foram inspecionadas. O smoke permite `--port`; o padrão agora é 8766 para não disputar a porta do preview.
+
+## Cortes e persistência
+
+Fixtures sintéticas reais de baixa resolução, geradas por ffmpeg, verificam primeira de 30 s com entradas 120, 240, 30, 60, 91,2, 29,9 e 90 s. Saídas respectivas: `30+60+30`, `30+60+60+60+30`, `30`, `30+30`, `30+60+1,2`, `29,9` e `30+60`. O caso de 240 s agora pode gerar cinco partes: limitar artificialmente a quatro perderia conteúdo. Regressões de primeira de 60 s cobrem 120, 240, 60, 61,2 e 119,9 s. Entrada 240,1 s é rejeitada antes de produzir arquivos em ambos os perfis.
+
+Cada parte é medida e decodificada independentemente: H.264/yuv420p, AAC, keyframe inicial, duração de vídeo/áudio/container sem exceder o teto selecionado, fim dos pacotes no ponto esperado. Marcador vermelho e áudio decodificado no final confirmam preservação do conteúdo final. Mantêm-se as tolerâncias de quantização documentadas no registro anterior, sem tolerância para ultrapassar o teto.
+
+Testes da API cobrem rejeição de zero, negativos, frações, strings e outros tipos inválidos no JSON; headers de upload inválidos; padrão 60; ambos os caminhos até o worker real; migração idempotente de banco antigo com tarefas pendentes e resultados existentes; nova instância sobre o mesmo SQLite recuperando uma tarefa de 30 s; duas sessões com escolhas diferentes na fila. Nos testes de link, somente a operação de rede é substituída por mídia sintética — não constitui extração remota real. Os testes de segurança e extração existentes continuam passando.
+
+## Navegador e HTTP
+
+Chromium usa contextos próprios para mobile **390×844**, com touch/emulação móvel, e desktop **1440×1000**. Asserções verificam ordem no DOM e posição de resultados antes das instruções, padrão 60 e ausência de overflow. Para **cada formulário e cada opção 30/60**, o POST fica retido sem resposta: o teste exige feedback visível na viewport, foco no status, `aria-busy=true`, submit desabilitado e somente uma requisição após nova tentativa de submissão. Inspeciona o JSON/header transmitido antes de responder. Rejeições 429 e falhas de rede liberam ações e removem o spinner nos dois caminhos.
+
+Estados de fila/processamento/erro do link são simulados explicitamente. O upload de 61,2 s passa pelo servidor/SQLite/worker/ffmpeg reais: HTTP padrão gera `60+1,2`; upload mobile com primeira de 30 s gera `30+31,2`. Downloads são acionados em ordem, conferidos por nome e medidos por ffprobe. A prévia decodifica; atualizações de outra tarefa preservam o mesmo elemento de vídeo e não alteram a rolagem. Reload, exclusão e 404 após exclusão também passam. Nenhum erro JavaScript observado.
+
+**Limitações:** mídias são sintéticas; Instagram real continua sem comprovação, com observação anterior de bloqueio por login/rate limit. X real, publicação em WhatsApp físico, CI remoto e build Docker não foram testados nesta entrega. Nenhum mecanismo de extração/contorno foi acrescentado.
+
+Os registros abaixo são históricos: contagens de testes, portas e saídas de quatro partes descrevem as revisões anteriores e o perfil de 60 s.
+
+---
+
+# Registro anterior: revisão v1 — 21/10/2026
 
 Worktree `/home/ubuntu/projects/instazap-worktrees/revisao-v1`, branch `fix/revisao-v1`. Execução local em Linux/Python 3.14.5. Configuração global preservada. Esta revisão não executou push, PR, merge ou deploy. Conversão de mídia e controles SSRF de destinos secundários permanecem intactos.
 

@@ -12,23 +12,29 @@ def info(path):
                                               '-show_streams', '-of', 'json', str(path)]))
 
 
-@pytest.mark.parametrize('duration,expected', [(120, [60, 60]), (240, [60]*4), (60, [60]),
-                                               (61.2, [60, 1.2]), (119.9, [60, 59.9])])
-def test_real_splits_and_tail(media, tmp_path, duration, expected):
+@pytest.mark.parametrize('first,duration,expected', [
+    (60, 120, [60, 60]), (60, 240, [60]*4), (60, 60, [60]),
+    (60, 61.2, [60, 1.2]), (60, 119.9, [60, 59.9]),
+    (30, 120, [30, 60, 30]), (30, 240, [30, 60, 60, 60, 30]),
+    (30, 30, [30]), (30, 60, [30, 30]), (30, 91.2, [30, 60, 1.2]),
+    (30, 29.9, [29.9]), (30, 90, [30, 60]),
+])
+def test_real_splits_and_tail(media, tmp_path, first, duration, expected):
     source = media(duration)
-    parts = split(source, tmp_path)
+    parts = split(source, tmp_path, first_part_seconds=first)
     assert len(parts) == len(expected)
-    for part, wanted in zip(parts, expected, strict=True):
+    for index, (part, wanted) in enumerate(zip(parts, expected, strict=True)):
+        ceiling = first if index == 0 else 60
         target = tmp_path / part['name']
         result = info(target)
         actual = float(result['format']['duration'])
-        assert 0 < actual <= 60
+        assert 0 < actual <= ceiling
         assert actual == pytest.approx(wanted, abs=.025)
         v, a = result['streams']
         assert v['codec_name'] == 'h264' and v['pix_fmt'] == 'yuv420p'
         assert a['codec_name'] == 'aac'
-        assert float(a['duration']) <= 60
-        assert float(v['duration']) <= 60
+        assert float(a['duration']) <= ceiling
+        assert float(v['duration']) <= ceiling
         # Decode independently, including the entire tail: no reliance on preceding files.
         subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-threads', '1', '-i', str(target),
                         '-f', 'null', '-'], check=True)
@@ -49,9 +55,10 @@ def test_real_splits_and_tail(media, tmp_path, duration, expected):
     assert max(abs(v) for v in samples) > 1000
 
 
-def test_overlimit_is_rejected_without_output(media, tmp_path):
+@pytest.mark.parametrize('first', [30, 60])
+def test_overlimit_is_rejected_without_output(media, tmp_path, first):
     with pytest.raises(MediaError, match='240'):
-        split(media(240.1), tmp_path)
+        split(media(240.1), tmp_path, first_part_seconds=first)
     assert not list(tmp_path.iterdir())
 
 
@@ -85,3 +92,9 @@ def test_local_playlist_cannot_read_other_files(media, tmp_path):
     source.write_text(f'#EXTM3U\n#EXTINF:1,\n{media(1)}\n#EXT-X-ENDLIST\n')
     with pytest.raises(RuntimeError):
         probe(source)
+
+
+@pytest.mark.parametrize('value', [0, -30, 30.5, 30.0, '30', None, True, 90])
+def test_split_rejects_invalid_first_part(tmp_path, value):
+    with pytest.raises(ValueError, match='30 ou 60'):
+        split(tmp_path / 'missing', tmp_path, first_part_seconds=value)

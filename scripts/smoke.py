@@ -1,6 +1,6 @@
 """Real local HTTP + optional mobile browser smoke. All media are SYNTHETIC TEST fixtures.
 Run: uv run python scripts/smoke.py [--browser]
-Owns only a temporary server at 127.0.0.1:8765; never connects to social networks.
+Owns only a temporary server at 127.0.0.1:8766; never connects to social networks.
 """
 import argparse
 import json
@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = 'http://127.0.0.1:8765'
+BASE = 'http://127.0.0.1:8766'
 
 
 def fixture(path):
@@ -34,49 +34,152 @@ def browser_smoke(source):
         existing = sorted((Path.home() / '.cache/ms-playwright').glob('chromium-*/chrome-linux*/chrome'))
         executable = os.getenv('INSTAZAP_TEST_CHROME') or (str(existing[-1]) if existing else None)
         browser = p.chromium.launch(executable_path=executable, headless=True, args=['--disable-dev-shm-usage'])
-        context = browser.new_context(viewport={'width':390, 'height':844}, is_mobile=True, has_touch=True,
-                                      accept_downloads=True)
-        page = context.new_page()
         errors = []
+        from playwright.sync_api import expect
+        for width, height in [(390, 844), (1440, 1000)]:
+            context = browser.new_context(viewport={'width':width, 'height':height},
+                                          is_mobile=width == 390, has_touch=width == 390,
+                                          accept_downloads=True)
+            page = context.new_page()
+            page.on('pageerror', lambda exc: errors.append(str(exc)))
+            page.goto(BASE)
+            expect(page.locator('#input-area')).to_be_visible()
+            expect(page.locator('#first-part-control input[value="60"]')).to_be_checked()
+            assert page.evaluate("""() => {
+                const before = (a,b) => !!(document.querySelector(a).compareDocumentPosition(document.querySelector(b)) & Node.DOCUMENT_POSITION_FOLLOWING);
+                return before('#link-form','#upload-form') && before('#upload-form','.results') && before('.results','.how');
+            }""")
+            assert page.locator('.results').bounding_box()['y'] < page.locator('.how').bounding_box()['y']
+            # Hold each POST: assert visible busy feedback while NO response exists.
+            for kind in ['link', 'upload']:
+                for first in [30, 60]:
+                    page.locator(f'input[name="first-part"][value="{first}"]').check()
+                    held = []
+                    pattern = f'**/api/jobs/{kind}'
+                    page.route(pattern, lambda route, request, pending=held: pending.append(route))
+                    if kind == 'link':
+                        page.locator('#url').fill('https://www.instagram.com/reel/SYNTHETIC/')
+                        button = page.get_by_role('button', name='Preparar vídeo pelo link')
+                    else:
+                        page.locator('#video-file').set_input_files(str(source))
+                        button = page.get_by_role('button', name='Dividir meu vídeo')
+                    button.click()
+                    expect(page.locator('#submission-status')).to_be_visible()
+                    expect(page.locator('#submission-message')).to_contain_text('Aguarde… recebendo')
+                    expect(button).to_be_disabled()
+                    expect(page.locator('#input-area')).to_have_attribute('aria-busy','true')
+                    expect(page.locator('#submission-status')).to_be_focused()
+                    assert page.locator('#submission-status').evaluate('(e) => { const r=e.getBoundingClientRect(); return r.top>=0 && r.bottom<=innerHeight; }'), (width, kind, first, page.locator('#submission-status').bounding_box(), page.evaluate('innerHeight'))
+                    page.wait_for_timeout(350)
+                    assert len(held) == 1
+                    if kind == 'link':
+                        assert held[0].request.post_data_json['first_part_seconds'] == first
+                    else:
+                        assert held[0].request.headers['x-first-part-seconds'] == str(first)
+                    page.locator(f'#{kind}-form').evaluate('(f) => f.dispatchEvent(new Event("submit", {cancelable:true}))')
+                    page.wait_for_timeout(100)
+                    assert len(held) == 1, 'Duplicate POST during pending request'
+                    held[0].fulfill(status=429, content_type='application/json',
+                                    body=json.dumps({'detail':'Fila de teste cheia. Tente novamente.'}))
+                    expect(page.locator('#error')).to_contain_text('Fila de teste cheia')
+                    expect(button).to_be_enabled()
+                    expect(page.locator('#submission-status')).to_be_hidden()
+                    expect(page.locator('#input-area')).to_have_attribute('aria-busy','false')
+                    if first == 30:
+                        button.click()
+                        expect(page.locator('#submission-status')).to_be_visible()
+                        page.wait_for_timeout(100)
+                        assert len(held) == 2
+                        held[1].abort('failed')
+                        expect(page.locator('#error')).to_contain_text('Conexão interrompida')
+                        expect(button).to_be_enabled()
+                        expect(page.locator('#submission-status')).to_be_hidden()
+                    page.unroute(pattern)
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            if width == 390:
+                context.close()
+
+        # Successful link submission with explicit synthetic queue/worker states.
+        fake = {'id':'synthetic', 'created':time.time(), 'expires':time.time()+3600,
+                'state':'queued', 'progress':0, 'error':None, 'parts':[]}
+        page.route('**/api/jobs', lambda route: route.fulfill(json=[fake]))
+        page.route('**/api/jobs/link', lambda route: route.fulfill(status=202, json={'id':'synthetic'}))
+        page.get_by_role('button', name='Preparar vídeo pelo link').click()
+        expect(page.locator('.job-status')).to_have_text('Na fila')
+        fake.update(state='processing', progress=25)
+        expect(page.locator('.job-status')).to_have_text('Preparando as partes · 25%', timeout=10000)
+        fake.update(state='error', error='Link de teste indisponível. Envie o arquivo.')
+        expect(page.locator('.job .error')).to_contain_text('Envie o arquivo', timeout=10000)
+        page.unroute('**/api/jobs')
+        page.unroute('**/api/jobs/link')
+        context.close()
+        context = browser.new_context(viewport={'width':390, 'height':844}, is_mobile=True,
+                                      has_touch=True, accept_downloads=True)
+        page = context.new_page()
         page.on('pageerror', lambda exc: errors.append(str(exc)))
         page.goto(BASE)
+        page.locator('input[name="first-part"][value="30"]').check()
         page.locator('#video-file').set_input_files(str(source))
         page.get_by_role('button', name='Dividir meu vídeo').click()
         page.get_by_text('Pronto para o Status', exact=True).wait_for(timeout=120000)
         assert page.locator('.part').count() == 2
+        assert page.locator('.part p').all_text_contents() == ['Parte 1 de 2 · 30.0 s', 'Parte 2 de 2 · 31.2 s']
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-        # Real preview loads from authorized HTTP route and decodes.
-        page.locator('video').first.evaluate('(v) => { v.preload="auto"; v.load(); }')
+        page.locator('video').first.evaluate('(v) => { window.originalPreview=v; v.preload="auto"; v.load(); }')
         page.wait_for_function('() => document.querySelector("video").readyState >= 2')
-        with page.expect_download() as pending:
-            page.get_by_role('link', name='Baixar parte 1', exact=True).click()
-        download = pending.value
-        assert download.suggested_filename == 'video-parte-01-de-02.mp4'
-        assert Path(download.path()).stat().st_size > 0
+        # Polling another job must retain the existing preview node and playback state.
+        jobs = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')
+        fake.update(state='processing', error=None)
+        page.route('**/api/jobs', lambda route: route.fulfill(json=jobs+[fake]))
+        expect(page.locator('.job-status').last).to_contain_text('Preparando', timeout=10000)
+        scroll_before_poll = page.evaluate('scrollY')
+        fake['progress'] = 75
+        expect(page.locator('.job-status').last).to_contain_text('75%', timeout=10000)
+        assert page.evaluate('scrollY') == scroll_before_poll
+        assert page.evaluate('window.originalPreview === document.querySelector("video") && window.originalPreview.readyState >= 2')
+        page.unroute('**/api/jobs')
+        for index, duration in [(1, 30), (2, 31.2)]:
+            with page.expect_download() as pending:
+                page.get_by_role('link', name=f'Baixar parte {index}', exact=True).click()
+            download = pending.value
+            assert download.suggested_filename == f'video-parte-{index:02}-de-02.mp4'
+            data = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_format',
+                                                       '-of','json',download.path()]))
+            assert float(data['format']['duration']) == duration
         page.reload()
         page.get_by_text('Pronto para o Status', exact=True).wait_for()
         page.screenshot(path=str(artifacts / 'mobile.png'), full_page=True)
-        page.set_viewport_size({'width':1440, 'height':1000})
+        saved_session = context.storage_state()
+        context.close()
+        context = browser.new_context(viewport={'width':1440, 'height':1000}, storage_state=saved_session)
+        page = context.new_page()
+        page.on('pageerror', lambda exc: errors.append(str(exc)))
+        page.goto(BASE)
+        page.get_by_text('Pronto para o Status', exact=True).wait_for()
         page.screenshot(path=str(artifacts / 'desktop.png'), full_page=True)
         page.get_by_role('button', name='Excluir agora').click()
         page.wait_for_function('() => document.querySelectorAll(".job").length === 0')
         assert errors == [], errors
         browser.close()
-    print('BROWSER PASS: 390×844, upload, 2 previews, video decode, download, reload, delete; no JS errors/overflow')
+    print('BROWSER PASS: mobile/desktop order, delayed link/upload busy feedback, duplicate guard, 30/60 transmission, rejection recovery, synthetic link stages, real 30-first upload/downloads, stable previews, reload/delete')
 
 
 def main():
     args = argparse.ArgumentParser()
     args.add_argument('--browser', action='store_true')
+    args.add_argument('--port', type=int, default=8766)
     options = args.parse_args()
+    global BASE
+    BASE = f'http://127.0.0.1:{options.port}'
     with socket.socket() as sock:
-        sock.bind(('127.0.0.1', 8765))  # Refuse to reuse an unrelated server.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('127.0.0.1', options.port))  # Refuse to reuse an unrelated server.
     with tempfile.TemporaryDirectory(prefix='instazap-e2e-') as temporary:
         source = Path(temporary) / 'SYNTHETIC-TEST-61.2s.mp4'
         fixture(source)
         env = dict(os.environ, INSTAZAP_DATA=str(Path(temporary) / 'data'),
                    INSTAZAP_ACCESS_SECRET='', INSTAZAP_ORIGIN='', INSTAZAP_SECURE_COOKIE='0',
-                   INSTAZAP_BIND='127.0.0.1', INSTAZAP_PORT='8765')
+                   INSTAZAP_BIND='127.0.0.1', INSTAZAP_PORT=str(options.port))
         proc = subprocess.Popen([sys.executable, 'scripts/serve.py'],
                                 cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
@@ -128,7 +231,7 @@ def main():
                 proc.kill()
                 _, stderr = proc.communicate()
             assert proc.returncode in (0, -15), stderr.decode()
-            print('SERVER STOPPED: 127.0.0.1:8765')
+            print(f'SERVER STOPPED: {BASE}')
 
 
 if __name__ == '__main__':

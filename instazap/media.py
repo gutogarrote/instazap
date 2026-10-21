@@ -40,17 +40,26 @@ def probe(path: Path):
     return duration, width, height, any(s['codec_type'] == 'audio' for s in streams)
 
 
-def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None):
+def validate_first_part(value):
+    if type(value) is not int or value not in (30, 60):
+        raise ValueError('A primeira parte deve ter 30 ou 60 segundos.')
+    return value
+
+
+def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None, first_part_seconds=60):
+    validate_first_part(first_part_seconds)
     duration, width, height, audio = probe(source)
-    count = math.ceil(duration / 60)
+    count = 1 + math.ceil(max(0, duration - first_part_seconds) / 60)
+    offset = 0
     parts = []
     for index in range(count):
         progress(index, count)
         name = f'video-parte-{index + 1:02}-de-{count:02}.mp4'
         target = directory / name
-        span = min(60, duration - index * 60)
+        ceiling = first_part_seconds if index == 0 else 60
+        span = min(ceiling, duration - offset)
         args = ['ffmpeg', '-nostdin', '-v', 'error', '-y', '-threads', '1',
-                '-filter_threads', '1', '-protocol_whitelist', 'file', '-format_whitelist', INPUT_FORMATS, '-ss', str(index * 60),
+                '-filter_threads', '1', '-protocol_whitelist', 'file', '-format_whitelist', INPUT_FORMATS, '-ss', str(offset),
                 '-i', str(source), '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn',
                 '-t', f'{span:.9f}', '-vf', f'scale={width}:{height},setsar=1,fps=30',
                 '-c:v', 'libx264', '-threads', '1', '-preset', 'veryfast', '-crf', '23',
@@ -62,7 +71,8 @@ def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None):
         result = json.loads(run(['ffprobe', '-v', 'error', '-show_format', '-show_streams',
                                  '-of', 'json', target], timeout=30))
         actual = float(result['format']['duration'])
-        if actual > 60 or actual < span - 0.05:
-            raise MediaError('Não foi possível preservar o final dentro do limite de 60 s. Tente outro arquivo.')
+        if actual > ceiling or actual < span - 0.05:
+            raise MediaError('Não foi possível preservar o final dentro do limite desta parte. Tente outro arquivo.')
+        offset += span
         parts.append({'name': name, 'duration': actual, 'bytes': target.stat().st_size, 'audio': audio})
     return parts
