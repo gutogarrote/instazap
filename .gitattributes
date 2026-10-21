@@ -1,0 +1,2 @@
+# Preserve the original report's intentional Markdown hard line breaks.
+docs/planejamento-original.md whitespace=-blank-at-eol

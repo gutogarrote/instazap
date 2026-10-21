@@ -1,0 +1,33 @@
+services:
+  instazap:
+    build: .
+    ports:
+      - "${INSTAZAP_BIND:-127.0.0.1}:${INSTAZAP_PORT:-8765}:8765"
+    environment:
+      INSTAZAP_DATA: /data
+      INSTAZAP_ACCESS_SECRET: ${INSTAZAP_ACCESS_SECRET:-}
+      INSTAZAP_SECURE_COOKIE: ${INSTAZAP_SECURE_COOKIE:-0}
+      INSTAZAP_ORIGIN: ${INSTAZAP_ORIGIN:-}
+    volumes:
+      - instazap-data:/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 1.0
+    mem_limit: 1536m
+    pids_limit: 96
+    logging:
+      options:
+        max-size: "5m"
+        max-file: "2"
+    healthcheck:
+      test: [CMD, .venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  instazap-data:

@@ -1,0 +1,21 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.16"
+          python-version: "3.12"
+          enable-cache: true
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: uv sync --frozen
+      - run: uv run ruff check instazap tests scripts
+      - run: uv run pytest -q
+      - run: uv export --no-dev --no-emit-project --format requirements-txt > /tmp/requirements-audit.txt
+      - run: uv run pip-audit -r /tmp/requirements-audit.txt --disable-pip
+      - run: docker build -t instazap:test .
