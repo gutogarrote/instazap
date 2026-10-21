@@ -1,0 +1,15 @@
+# Decisões implementadas — 21/10/2026
+
+Este arquivo e o README substituem recomendações conflitantes do planejamento original, que permanece intacto em `planejamento-original.md`.
+
+- Uso próprio/poucos amigos, sem contratação, tokens de plataformas, API paga do X, R2 ou serviços cloud necessários.
+- Python FastAPI + SQLite + HTML/CSS/JS sem build. Um único processo/host, um worker serial. Docker opcional; uv nativo suportado.
+- Perfil fixo de **60 s**, entrada até **240 s/200 MB decimais**, até quatro partes. Nunca cortar entrada acima do limite. Resolução até 720p em qualquer orientação, H.264/AAC/yuv420p e 30 fps.
+- Recodificar cada parte com busca precisa do ffmpeg; cada MP4 inicia com keyframe independente. Validar a duração de apresentação final, rejeitando saída acima de 60 s ou com perda de duração >50 ms. Testar último quadro e áudio com fixtures reais sintéticas.
+- yt-dlp usa somente os extratores de publicação Instagram/Twitter e um transporte HTTPS restrito com DNS público preso ao socket e TLS válido. Só MP4 direto, nunca HLS/DASH, downloader externo ou ffmpeg remoto. Falha sempre orienta upload, sem recorrer a login, cookies pessoais, proxy arbitrário ou serviços terceiros.
+- Todas as requisições secundárias e redirects passam pela mesma política de rede e orçamento de bytes/tempo. Upload tem contagem de bytes em streaming de corpo bruto, sem parser multipart.
+- Fila/estados e donos persistem. Reinício recupera processamento a partir da origem; upload incompleto exige reenvio. Um lock Unix impede múltiplos servidores sobre o mesmo volume; PR_SET_PDEATHSIG impede ffmpeg órfão após morte da API, e desligamento normal devolve a tarefa à fila.
+- Origem removida ao terminar. Resultados e erros expiram após 24 h; autorizações checam o prazo independentemente da limpeza física. Exclusão agora invalida o registro e cancela subprocesso ativo. Sessão dura sete dias com token aleatório, cookie HttpOnly/Strict; permite HTTP em VPN privada. Sem acesso a dados de outra sessão.
+- Bind local por padrão, VPN recomendada. Segredo compartilhado configurável para novas sessões; HTTPS/origem explícita em exposição pública. Limite de fila não substitui autenticação.
+- Recursos conservadores para compartilhar host 2CPU/4GB com Hermes: Docker limita a 1 CPU e 1,5 GB, subprocessos a 1 GiB de espaço virtual, fila até oito tarefas, orçamento de dados 3 GB e reserva de espaço antes de aceitar uploads. Nenhuma configuração do host foi alterada.
+- Build Docker e publicação externa ficam para revisão independente; nenhum push, PR, merge ou deploy foi solicitado/executado. Resultado real de Instagram/X continua **não verificado**; não confundir mídia sintética de teste com obtenção remota.
