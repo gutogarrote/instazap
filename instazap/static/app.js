@@ -32,10 +32,14 @@ function render(jobs) {
   signature = next;
   $('empty').hidden = jobs.length > 0;
   $('job-count').textContent = `${jobs.length} vídeo${jobs.length === 1 ? '' : 's'}`;
+  let refocus = null;
   const cards = jobs.map((job) => {
     const existing = Array.from($('jobs').children).find(card => card.dataset.id === job.id);
     if (existing && existing.dataset.signature === JSON.stringify(job)) return existing;
     const card = node('article', '', 'job'); card.dataset.id = job.id; card.dataset.signature = JSON.stringify(job);
+    // A re-rendered card keeps the focus given to it after a cut (progress updates replace it).
+    if (existing && existing.tabIndex === -1) card.tabIndex = -1;
+    if (existing && document.activeElement === existing) refocus = card;
     card.setAttribute('aria-busy', ['receiving', 'queued', 'processing'].includes(job.state));
     const head = node('div', '', 'job-top');
     head.append(node('h3', `Vídeo de ${new Date(job.created * 1000).toLocaleString('pt-BR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}`));
@@ -70,6 +74,7 @@ function render(jobs) {
   });
   for (const card of Array.from($('jobs').children)) if (!cards.includes(card)) card.remove();
   cards.forEach((card, index) => { if ($('jobs').children[index] !== card) $('jobs').insertBefore(card, $('jobs').children[index] || null); });
+  if (refocus) refocus.focus({preventScroll:true});
 }
 async function refresh() {
   if (!csrf) return;
@@ -95,7 +100,7 @@ function applyMode() {
   const link = $('link-form').querySelector('button');
   link.textContent = manual ? (replacing ? 'Trocar vídeo →' : 'Carregar vídeo →') : 'Preparar →';
   link.setAttribute('aria-label', manual ? 'Carregar vídeo pelo link para escolher o corte' : 'Preparar vídeo pelo link');
-  $('upload-button').firstChild.textContent = manual ? 'Carregar vídeo para escolher o corte ' : 'Dividir meu vídeo ';
+  $('upload-button').firstChild.textContent = manual ? (replacing ? 'Trocar pelo vídeo do aparelho ' : 'Carregar vídeo para escolher o corte ') : 'Dividir meu vídeo ';
   try { sessionStorage.setItem('instazap-mode', mode()); } catch { /* Private mode: choice is not restored. */ }
 }
 function restoreMode() {
@@ -131,11 +136,23 @@ async function accepted(id, manual) {
   try { const jobs = await api('/api/jobs'); if (mine >= applied) { applied = mine; render(jobs); } }
   catch (e) { error('Vídeo recebido. Não foi possível atualizar a fila. A página tentará novamente.'); }
 }
-$('upload-form').addEventListener('submit', (e) => {
+// Explicit "Trocar vídeo" (manual mode): discard the waiting preview, then load the new video.
+function replaceable(manual) { return manual && cutter.id && cutter.state !== 'cutting' ? cutter.id : null; }
+async function discardPreview(id, kind) {
+  $('submission-message').textContent = 'Aguarde… descartando o vídeo anterior.';
+  await api(`/api/jobs/${id}`, {method:'DELETE'});
+  forgetCut(id); hideCutter(); epoch++;
+  $('submission-message').textContent = `Aguarde… recebendo ${kind === 'link' ? 'o link' : 'o arquivo'}.`;
+}
+$('upload-form').addEventListener('submit', async (e) => {
   e.preventDefault(); if (busy) return;
   const file = $('video-file').files[0]; if (!file) return;
   if (file.size > 200000000) { error('O arquivo ultrapassa 200 MB. Envie um arquivo menor.'); return; }
-  const duration = firstPart(), manual = mode() === 'manual'; beginSubmission('upload');
+  const duration = firstPart(), manual = mode() === 'manual', replaced = replaceable(manual); beginSubmission('upload');
+  if (replaced) {
+    try { await discardPreview(replaced, 'upload'); }
+    catch (err) { error(err.message); endSubmission(); applyMode(); await mutated(); return; }
+  }
   const xhr = new XMLHttpRequest(); xhr.open('POST', '/api/jobs/upload'); xhr.setRequestHeader('X-CSRF-Token', csrf);
   xhr.setRequestHeader('X-First-Part-Seconds', String(duration)); xhr.timeout = 125000;
   if (manual) xhr.setRequestHeader('X-Mode', 'manual');
@@ -150,7 +167,7 @@ $('upload-form').addEventListener('submit', (e) => {
         try { message = JSON.parse(xhr.responseText).detail || message; } catch { /* Use fallback. */ }
         error(message);
       }
-    } finally { endSubmission(); }
+    } finally { endSubmission(); applyMode(); }
   };
   xhr.onerror = xhr.ontimeout = xhr.onabort = () => { error('Conexão interrompida. Envie o arquivo novamente.'); endSubmission(); };
   try { xhr.send(file); } catch { error('O envio falhou. Tente novamente.'); endSubmission(); }
@@ -159,16 +176,10 @@ $('link-form').addEventListener('submit', async (e) => {
   e.preventDefault(); if (busy) return;
   const manual = mode() === 'manual';
   const body = JSON.stringify(manual ? {url:$('url').value.trim(), mode:'manual'} : {url:$('url').value.trim(), first_part_seconds:firstPart()});
-  const replaced = manual && cutter.id && cutter.state !== 'cutting' ? cutter.id : null;
+  const replaced = replaceable(manual);
   beginSubmission('link');
   try {
-    if (replaced) {
-      // Explicit "Trocar vídeo": discard the waiting preview, then load the new link.
-      $('submission-message').textContent = 'Aguarde… descartando o vídeo anterior.';
-      await api(`/api/jobs/${replaced}`, {method:'DELETE'});
-      forgetCut(replaced); hideCutter(); epoch++;
-      $('submission-message').textContent = 'Aguarde… recebendo o link.';
-    }
+    if (replaced) await discardPreview(replaced, 'link');
     const job = await api('/api/jobs/link', {method:'POST',headers:{'Content-Type':'application/json'}, body, signal:AbortSignal.timeout(125000)});
     $('url').value = ''; await accepted(job.id, manual);
   } catch (e) { error(e.message); if (replaced) await mutated(); } finally { endSubmission(); applyMode(); }
@@ -237,7 +248,7 @@ function showCutter(id, state, duration, announce) {
   cutter.state = state;
   if (state !== 'awaiting_cut') {
     $('cutter-stage').hidden = true;
-    cutterStatus('Baixando e medindo o vídeo com segurança… Isso pode levar alguns minutos. Nada será cortado ainda.', true);
+    cutterStatus('Baixando o vídeo e preparando a prévia… Isso pode levar alguns minutos. Nada será cortado ainda.', true);
   } else if ($('cutter-stage').hidden) {
     cutter.duration = duration;
     range.max = String(maxCut());

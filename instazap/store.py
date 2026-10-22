@@ -177,11 +177,16 @@ class Store:
         with self.db() as db:
             db.execute("UPDATE jobs SET state='queued',progress=0 WHERE state='processing'")
             db.execute("UPDATE jobs SET state='error',error='Upload interrompido. Envie o arquivo novamente.' WHERE state='receiving'")
+            # A waiting preview from an older version (raw source as preview) is prepared again.
+            for row in db.execute("SELECT id FROM jobs WHERE state='awaiting_cut'").fetchall():
+                if not (self.files / row['id'] / 'preview.mp4').is_file():
+                    db.execute("UPDATE jobs SET state='queued', progress=0 WHERE id=?", (row['id'],))
             rows = db.execute('SELECT id,state FROM jobs').fetchall()
         for row in rows:
             folder = self.files / row['id']
+            keep = {'source', 'preview.mp4'} if row['state'] == 'awaiting_cut' else {'source'}
             for path in folder.glob('*'):
-                if row['state'] != 'ready' and path.name != 'source':
+                if row['state'] != 'ready' and path.name not in keep:
                     path.unlink(missing_ok=True)
                 if row['state'] == 'error':
                     path.unlink(missing_ok=True)

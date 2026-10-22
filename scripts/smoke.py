@@ -260,6 +260,7 @@ def browser_smoke(source, link):
         page.wait_for_function('() => document.querySelectorAll(".job").length === 0')
         context.close()
         manual_browser(browser, errors, artifacts, link)
+        timeline_browser(browser, errors, link.parent)
         assert errors == [], errors
         browser.close()
     print('BROWSER PASS: mobile/desktop order, delayed link/upload busy feedback, duplicate guard, 30/60 transmission, rejection recovery, synthetic link stages, real 30-first upload/downloads, stable previews, reload/delete')
@@ -304,7 +305,7 @@ def manual_browser(browser, errors, artifacts, link):
     assert len(held) == 1, 'Duplicate load during pending request'
     held[0].continue_()
     page.unroute('**/api/jobs/link')
-    expect(page.locator('#cutter-message')).to_contain_text('Baixando e medindo')
+    expect(page.locator('#cutter-message')).to_contain_text('preparando a prévia')
     assert page.locator('#cutter').evaluate('(e) => e.getBoundingClientRect().top < innerHeight')
     expect(page.locator('#cutter-message')).to_contain_text('Prévia pronta', timeout=60000)
     expect(button).to_be_enabled()
@@ -494,6 +495,179 @@ def manual_browser(browser, errors, artifacts, link):
           f'44 px targets, delayed load feedback, stable player while polling, reload recovery, rejection/network '
           f'retry, one cut despite repeated clicks, stale poll ignored, cut {chosen:.6f} s → {durations}, '
           f'preview failure, link replacement, discard, downloader failure')
+
+
+def timeline_fixture(path, offset=None, video=12.0, audio=12.0):
+    """SYNTHETIC: testsrc2 (a distinct picture per frame) + chirp; container picks the start time."""
+    args = ['ffmpeg', '-nostdin', '-v', 'error', '-y', '-threads', '1', '-f', 'lavfi', '-i',
+            f'testsrc2=s=96x128:r=30:d={video}', '-f', 'lavfi', '-i',
+            f'aevalsrc=0.3*sin(2*PI*(300*t+3*t*t)):s=48000:d={audio}', '-c:v', 'libx264', '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p', '-c:a', 'aac']
+    if offset is not None:
+        args += ['-output_ts_offset', str(offset)]
+    subprocess.run([*args, str(path)], check=True)
+    return float(json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_format', '-of', 'json',
+                                                      str(path)]))['format']['start_time'])
+
+
+def source_frames(path):
+    """Every decoded source frame (96x128 RGB) with its time on the demuxer's common origin."""
+    origin = float(json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_format', '-of', 'json',
+                                                        str(path)]))['format']['start_time'])
+    times = [float(f['best_effort_timestamp_time']) - origin for f in json.loads(subprocess.check_output(
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_frames', '-show_entries',
+         'frame=best_effort_timestamp_time', '-of', 'json', str(path)]))['frames']]
+    raw = subprocess.check_output(['ffmpeg', '-v', 'error', '-threads', '1', '-i', str(path), '-map', '0:v:0',
+                                   '-fps_mode', 'passthrough', '-s', '96x128', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])
+    size = 96 * 128 * 3
+    return times, [raw[i:i + size] for i in range(0, len(raw), size)]
+
+
+def matching_frame(picture, pictures):
+    scores = [sum(abs(a - b) for a, b in zip(picture[::5], p[::5], strict=True)) / len(picture[::5]) for p in pictures]
+    index = min(range(len(scores)), key=scores.__getitem__)
+    return index, scores[index]
+
+
+CANVAS = """() => { const v = document.querySelector('#cutter-video'); const c = document.createElement('canvas');
+    c.width = 96; c.height = 128; const g = c.getContext('2d'); g.drawImage(v, 0, 0, 96, 128);
+    const d = g.getImageData(0, 0, 96, 128).data, out = [];
+    for (let i = 0; i < d.length; i += 4) out.push(d[i], d[i + 1], d[i + 2]);
+    return out; }"""
+
+
+def timeline_browser(browser, errors, folder):
+    """Real Chromium on the authorized Range preview: what is displayed at t is where the part starts.
+    c843c0b served the raw source: Chromium showed a +5 s file at 4.978 s and the cut jumped ~5 s."""
+    from playwright.sync_api import expect
+    cases = []
+    for name, offset, video, audio in [('positive-offset.mp4', 5, 12.0, 12.0), ('negative-start.mkv', None, 12.0, 12.0),
+                                       ('transport.ts', None, 12.0, 12.0), ('audio-tail.mp4', None, 1.0, 4.0)]:
+        path = folder / f'SYNTHETIC-TEST-{name}'
+        start = timeline_fixture(path, offset, video, audio)
+        cases.append((path, start))
+    assert cases[0][1] > 4.9 and cases[1][1] < 0 and cases[2][1] > 1, cases
+    context = browser.new_context(viewport={'width': 1000, 'height': 1000})
+    page = context.new_page()
+    page.on('pageerror', lambda exc: errors.append(str(exc)))
+    page.goto(BASE)
+    page.get_by_text('Continuar de onde parei').click()
+
+    def load(path):
+        previous = page.evaluate('() => cutter.id')
+        page.locator('#video-file').set_input_files(str(path))
+        page.locator('#upload-button').click()
+        page.wait_for_function('(old) => cutter.id && cutter.id !== old && cutter.loaded', arg=previous, timeout=120000)
+        expect(page.locator('#cutter-message')).to_contain_text('Prévia pronta', timeout=120000)
+        expect(page.locator('#cutter-error')).to_be_hidden()
+        return page.evaluate('() => fetch("/api/jobs").then(r => r.json())')[0]
+
+    def go(seconds):
+        page.locator('#cut-input').fill(f'{seconds:.3f}'.replace('.', ','))
+        page.get_by_role('button', name='Ir', exact=True).click()
+        page.wait_for_function('() => { const v = document.querySelector("#cutter-video"); '
+                               'return !v.seeking && v.readyState >= 2; }')
+        page.wait_for_function('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))')
+        return page.evaluate('() => document.querySelector("#cutter-video").currentTime')
+
+    report = []
+    for number, (path, _start) in enumerate(cases):
+        if number:
+            # (a) A file upload in manual mode replaces the waiting preview, like the link does.
+            expect(page.locator('#upload-button')).to_contain_text('Trocar pelo vídeo do aparelho')
+            old = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')[0]['id']
+        job = load(path)
+        if number:
+            assert job['id'] != old and len(page.evaluate('() => fetch("/api/jobs").then(r => r.json())')) == 1
+        times, pictures = source_frames(path)
+        clock = page.evaluate('() => { const v = document.querySelector("#cutter-video"); return [v.currentTime, v.duration]; }')
+        assert clock[0] == 0 and abs(clock[1] - job['source_duration']) <= 1 / 30 + .002, (path.name, clock, job)
+        duration = job['source_duration']
+        positions = [0.0, 1.2345, duration * .45, duration - .2] if duration > 2 else [0.0, .5]
+        if 'audio-tail' in path.name:
+            positions = [0.4, 2.0, 3.0, 3.7]  # Video ends at 1 s: the held last picture is what parts start with.
+        for position in positions:
+            current = go(position)
+            assert abs(current - position) < 1e-3, (path.name, position, current)
+            expect(page.locator('#cut-time')).to_have_text(clock_text(position))
+            index, score = matching_frame(bytes(page.evaluate(CANVAS)), pictures)
+            # 30 fps re-timing: the picture is the source frame on screen within ±1/60 s of the point.
+            end = times[index + 1] if index + 1 < len(times) else math.inf
+            # Before the first video frame (A/V offset), players and parts show the first frame.
+            assert times[index] <= max(position, times[0]) + 1 / 60 + 1e-3 and end > position - 1 / 60 - 1e-3 \
+                and score < 8, (
+                path.name, position, index, times[index], score)
+            report.append(f'{path.name}@{position:.3f}→#{index}')
+        # Keyboard frame step moves the real player by one 30 fps frame too.
+        page.locator('#cut-range').focus()
+        page.keyboard.press('ArrowLeft')
+        page.wait_for_function('() => !document.querySelector("#cutter-video").seeking')
+        cut = 3.0 if 'audio-tail' in path.name else positions[1]
+        go(cut)
+        displayed, _ = matching_frame(bytes(page.evaluate(CANVAS)), pictures)
+        if number == 0:
+            # (b) Switching to full mode while a preview waits keeps it (and its player) intact.
+            page.evaluate('() => { window.keptVideo = document.querySelector("#cutter-video"); '
+                          'window.keptSrc = window.keptVideo.currentSrc; }')
+            page.get_by_text('Dividir o vídeo inteiro').click()
+            page.locator('#url').fill('https://www.instagram.com/reel/SYNTHFULL/')
+            page.get_by_role('button', name='Preparar vídeo pelo link').click()
+            expect(page.locator('#error')).to_contain_text('aguardando o corte')
+            expect(page.locator('#cutter')).to_be_visible()
+            assert page.evaluate('() => window.keptVideo === document.querySelector("#cutter-video") && '
+                                 'window.keptVideo.currentSrc === window.keptSrc')
+            expect(page.locator('#cut-time')).to_have_text(clock_text(cut))
+            assert page.evaluate('() => fetch("/api/jobs").then(r => r.json())')[0]['state'] == 'awaiting_cut'
+            page.get_by_text('Continuar de onde parei').click()
+            page.locator('#url').fill('')
+        page.get_by_role('button', name='Gerar partes', exact=False).click()
+        page.get_by_text('Pronto para o Status', exact=True).first.wait_for(timeout=120000)
+        ready = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')[0]
+        part = folder / f'timeline-{number}.mp4'
+        part.write_bytes(bytes(page.evaluate(
+            f'() => fetch("/api/jobs/{ready["id"]}/files/{ready["parts"][0]["name"]}").then(r => r.arrayBuffer())'
+            '.then(b => Array.from(new Uint8Array(b)))')))
+        first = subprocess.check_output(['ffmpeg', '-v', 'error', '-i', str(part), '-frames:v', '1', '-s', '96x128',
+                                         '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])
+        index, _ = matching_frame(first, pictures)
+        assert index == displayed, (path.name, cut, index, displayed)
+        # Audio starts at the same instant (chirp): no intro, and the whole tail is there.
+        grid = math.floor(round(cut * 1e6) * 30 / 1e6) * 1600
+        source_audio, joined = pcm(path) if not path.name.endswith('.mkv') else pcm_raw(path), array.array('h')
+        for item in ready['parts']:
+            target = folder / f'timeline-{number}-{item["name"]}'
+            target.write_bytes(bytes(page.evaluate(
+                f'() => fetch("/api/jobs/{ready["id"]}/files/{item["name"]}").then(r => r.arrayBuffer())'
+                '.then(b => Array.from(new Uint8Array(b)))')))
+            joined.extend(pcm(target))
+        assert correlation(source_audio[grid:grid + 1920], joined[:1920]) > .95, (path.name, cut)
+        assert len(joined) >= len(source_audio) - grid - 48, (path.name, len(joined), len(source_audio) - grid)
+        assert abs(sum(p['duration'] for p in ready['parts']) - (duration - grid / 48000)) <= 1 / 30 + .002
+        report.append(f'cut {cut:.4f} {path.name}: first frame #{index} = displayed #{displayed}')
+        page.get_by_role('button', name='Excluir agora').first.click()
+        page.wait_for_function('() => document.querySelectorAll(".job").length === 0')
+        if number == len(cases) - 1:
+            break
+        # Load a preview to be replaced by the next fixture's upload.
+        load(cases[number][0])
+        if number == 1:
+            # (d) Replace while the previous preview is playing: its late events must not leak.
+            page.evaluate('() => { const v = document.querySelector("#cutter-video"); v.muted = true; return v.play(); }')
+            page.wait_for_timeout(600)
+            assert page.evaluate('() => !document.querySelector("#cutter-video").paused')
+    context.close()
+    print('BROWSER TIMELINE PASS: real Range preview in Chromium; displayed frame = source frame on screen within ±1/60 s and '
+          '= first output frame, audio from the same instant: ' + '; '.join(report))
+
+
+def pcm_raw(path):
+    return array.array('h', subprocess.check_output(['ffmpeg', '-nostdin', '-v', 'error', '-threads', '1', '-i',
+                                                     str(path), '-vn', '-ac', '1', '-ar', '48000', '-f', 's16le', '-']))
+
+
+def clock_text(value):
+    ms = round(value * 1000)
+    return f'{ms // 60000}:{ms % 60000 // 1000:02d},{ms % 1000:03d}'
 
 
 def main():

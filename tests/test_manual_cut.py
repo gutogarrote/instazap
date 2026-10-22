@@ -230,7 +230,7 @@ def test_manual_link_waits_for_explicit_cut_then_splits_remainder(site, download
         assert db.execute('SELECT url FROM jobs WHERE id=?', (job_id,)).fetchone()[0] is None
     # Preview readiness never starts a split.
     assert not app.state.worker.once()
-    assert sorted(p.name for p in (app.state.store.files / job_id).iterdir()) == ['source']
+    assert sorted(p.name for p in (app.state.store.files / job_id).iterdir()) == ['preview.mp4', 'source']
     ranged = client.get(f'/api/jobs/{job_id}/source', headers={'Range': 'bytes=10-41'})
     assert ranged.status_code == 206 and len(ranged.content) == 32
     assert ranged.headers['content-type'] == 'video/mp4' and ranged.headers['cache-control'] == 'no-store'

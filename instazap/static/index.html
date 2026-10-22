@@ -26,7 +26,7 @@
 <div id="cutter-status" class="cutter-status" role="status" aria-live="polite" aria-atomic="true"><span class="spinner" id="cutter-spinner" aria-hidden="true"></span><span id="cutter-message"></span></div>
 <p id="cutter-error" class="error" role="alert" hidden></p>
 <div id="cutter-stage" hidden><video id="cutter-video" controls playsinline preload="metadata" aria-label="Prévia do vídeo carregado" aria-describedby="cutter-help"></video>
-<p id="cutter-help" class="hint">Arraste a barra ou use os botões até o ponto onde o seu Status parou. Só o trecho dali até o fim vira partes.</p>
+<p id="cutter-help" class="hint">Arraste a barra ou use os botões até o ponto onde o seu Status parou. Só o trecho dali até o fim vira partes. A prévia já mostra o resultado: se a imagem acabar antes do som, a última imagem fica parada até o fim, também nas partes.</p>
 <div class="cut-controls"><label for="cut-range">Início do corte</label><input id="cut-range" type="range" min="0" max="1" step="any" value="0">
 <p class="cut-time"><output id="cut-time" for="cut-range">0:00,000</output><span id="cut-total"></span></p>
 <div class="nudges" role="group" aria-label="Ajuste fino do ponto de corte"><button type="button" data-seconds="-1">−1 s</button><button type="button" data-frames="-1" aria-label="Voltar um quadro">−1 quadro</button><button type="button" data-frames="1" aria-label="Avançar um quadro">+1 quadro</button><button type="button" data-seconds="1">+1 s</button></div>

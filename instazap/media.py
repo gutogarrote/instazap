@@ -89,6 +89,7 @@ def validate_first_part(value):
 
 
 MANUAL_CEILING = 90
+PREVIEW_SIDE = 640
 FRAME = Fraction(1, 30)
 
 
@@ -138,10 +139,44 @@ def seconds(value):
     return f'{micros // 1_000_000}.{micros % 1_000_000:06d}'
 
 
-def measure(source: Path, cancel=None):
-    """Validate limits and return the decoded presentation duration used by the player and cuts."""
-    probe(source)
-    return max(presentation_timeline(source, cancel=cancel).values())
+def video_filter(width, height, duration):
+    # Shared by parts and preview: the same fps=30 grid from the common origin picks the same source frames.
+    return f'scale={width}:{height},setsar=1,tpad=stop_mode=clone:stop_duration={duration:.9f},fps=30'
+
+
+AUDIO_FILTER = 'aresample=48000:async=1:first_pts=0'
+
+
+def prepare_preview(source: Path, target: Path, cancel=None):
+    """Validate limits; write a small local preview on the exact timeline used for cuts.
+
+    Browsers disagree on container start times (Chromium shows raw timestamps,
+    e.g. 4.978 s for a stream starting there). The preview is encoded like the
+    parts: timestamps relative to the demuxer's common origin (A/V offsets kept),
+    the same 30 fps grid and the last frame held through an audio-only tail. So
+    player time t shows the frame a cut at t begins with. Returns the decoded
+    presentation duration of the source.
+    """
+    _, width, height, _ = probe(source)
+    duration = max(presentation_timeline(source, cancel=cancel).values())
+    shrink = min(1, PREVIEW_SIDE / max(width, height))
+    width, height = max(2, int(width * shrink) // 2 * 2), max(2, int(height * shrink) // 2 * 2)
+    run(['ffmpeg', '-nostdin', '-v', 'error', '-y', '-threads', '1', '-filter_threads', '1',
+         '-protocol_whitelist', 'file', '-format_whitelist', INPUT_FORMATS, '-i', str(source),
+         '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn', '-t', seconds(duration),
+         '-vf', video_filter(width, height, duration),
+         '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-crf', '30', '-g', '30',
+         '-pix_fmt', 'yuv420p', '-af', AUDIO_FILTER, '-c:a', 'aac', '-b:a', '96k', '-ar', '48000',
+         '-map_metadata', '-1', '-metadata:s:v', 'rotate=0', '-movie_timescale', '48000',
+         '-movflags', '+faststart', str(target)], cancel=cancel)
+    data = json.loads(run(['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-of', 'json', target], timeout=30))
+    starts = [float(s.get('start_time', 0)) for s in data['streams']]
+    ends = [float(s.get('start_time', 0)) + float(s.get('duration', 0)) for s in data['streams']]
+    # Never offer a preview whose clock could differ from the cut timeline.
+    if min(starts) < 0 or min(starts) > 1 / 30 + .001 or max(ends) < duration - (1 / 30 + .001):
+        logger.warning('media stage=preview starts=%s end=%.6f expected=%.6f', starts, max(ends), duration)
+        raise MediaError('Não foi possível preparar a prévia deste vídeo. Use “Dividir o vídeo inteiro”.')
+    return duration
 
 
 def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None, first_part_seconds=60,
@@ -180,10 +215,10 @@ def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None, 
                 '-filter_threads', '1', '-protocol_whitelist', 'file', '-format_whitelist', INPUT_FORMATS,
                 '-i', str(source), '-ss', seconds(offset), '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn',
                 '-t', seconds(span), '-vf',
-                f'scale={width}:{height},setsar=1,tpad=stop_mode=clone:stop_duration={duration:.9f},fps=30',
+                video_filter(width, height, duration),
                 '-c:v', 'libx264', '-threads', '1', '-preset', 'veryfast', '-crf', '23',
                 '-maxrate', '2500k', '-bufsize', '5000k', '-pix_fmt', 'yuv420p',
-                '-af', 'aresample=48000:async=1:first_pts=0',
+                '-af', AUDIO_FILTER,
                 '-c:a', 'aac', '-b:a', '128k', '-ar', '48000',
                 '-map_metadata', '-1', '-metadata:s:v', 'rotate=0',
                 '-movie_timescale', '48000', '-movflags', '+faststart', str(target)]

@@ -1,4 +1,55 @@
-# Validação: corte manual com player — 22/10/2026
+# Validação: linha do tempo da prévia (revisão independente) — 22/10/2026
+
+Mesma branch `feat/corte-manual-player`, sobre `c843c0b`. Sem push, PR, merge ou deploy; 8765 e outros worktrees intocados; servidores de teste só em `127.0.0.1:8872`, encerrados (nenhum listener restante). ffmpeg com um thread, testes executados um de cada vez.
+
+## Defeito reproduzido (endpoint real + Chromium)
+
+Fixture sintética privada do revisor (`offset5.mp4`: testsrc2 96×128 30 fps 12 s + seno, `-output_ts_offset 5`; vídeo começa em 5,000 s, áudio e formato em 4,978 s). Upload real no modo manual, prévia pelo endpoint autorizado com Range, seek pela interface, imagem do player capturada em canvas e comparada com todos os quadros decodificados da origem:
+
+| | `c843c0b` | Correção |
+|---|---|---|
+| Player ao carregar | `currentTime` 4,978, `duration` 12,022 | 0 e 12,033 (duração medida 12,032) |
+| Seek 1,0 / 4,0 s | preso em 4,978 s, quadro #0 | quadros #29 / #119, na tela em 0,989–1,022 / 3,989–4,022 s |
+| Corte em “4,0” | gravado como 4,978; parte começa no quadro #148 (≈4,93 s depois do que foi visto) | gravado 4,0; parte começa no quadro #119 = quadro exibido; 8,033 s = 12,032 − 4,0 |
+
+Causa: o player tocava a origem bruta e o corte usava a linha do tempo relativa à origem do demuxer. O Chromium usa os timestamps brutos do contêiner, e outros navegadores podem normalizar. Correção: prévia local normalizada, gerada com o mesmo filtro das partes (ver README).
+
+## Regressões novas e falha na baseline
+
+`tests/test_manual_timeline.py` (pytest, ffmpeg real): início zero, positivo (MP4 +5 s), MPEG-TS (≈1,4 s, vídeo 21 ms depois do áudio) e negativo (Matroska −0,021 s). Para cortes em 0; 1,2345; 45 % e perto do fim, verifica:
+- a prévia começa na origem e cobre a duração medida, na grade de 30 fps;
+- o primeiro quadro da parte é a imagem que a prévia mostra no corte;
+- essa imagem é o quadro de origem na tela a até ±1/60 s;
+- o áudio da parte correlaciona (>0,95) com a prévia e a origem no mesmo instante;
+- nenhuma amostra se perde até o fim.
+
+Também cobre um corte ponta a ponta pela API no +5 s, uma cauda só de áudio (vídeo 1 s, áudio 4 s: imagem mantida, corte em 3,0 s) e uma prévia em espera de versão anterior preparada de novo sem novo download.
+
+Contra o código de `c843c0b` (export `git archive` em TMPDIR, mesmo venv): **6 failed, 1 passed**. Só o caso de início zero passa, porque ele já funcionava. O smoke de navegador novo, rodado contra `c843c0b`, falha em `currentTime 4.978, duration 12.022`.
+
+`scripts/smoke.py --browser` ganhou **BROWSER TIMELINE PASS**: Chromium real no endpoint de Range com os quatro tipos de início. Em cada um, testa 4 posições digitadas e o teclado, compara a imagem do canvas com os quadros decodificados da origem e confirma que o primeiro quadro da parte é o exibido. Confere também o áudio desde o mesmo instante e as durações.
+
+## Bordas de recuperação/UI inspecionadas
+
+- **(a) Defeito comprovado:** em `c843c0b`, com prévia em espera, o link oferecia “Trocar vídeo”, mas o upload de arquivo recebia 429 (“Você já tem um vídeo… aguardando o corte”). Corrigido: no modo manual, o upload também descarta a prévia em espera e mostra “Trocar pelo vídeo do aparelho”.
+- **(b) Sem defeito:** mudar para “Dividir o vídeo inteiro” mantém a prévia visível, o mesmo elemento de vídeo e a posição. O job continua `awaiting_cut`. Um envio nesse modo recebe aviso (429), sem apagar nada. Coberto no smoke.
+- **(c)** Em `c843c0b`, a faixa de vídeo servida terminava em 1,0 s de uma linha do tempo de 4,0 s. A prévia normalizada mantém a última imagem até o fim do áudio, que é exatamente o que as partes contêm. A ajuda da interface diz isso. Testado em 2,0/3,0/3,7 s no Chromium e com corte em 3,0 s.
+- **(d) Sem defeito:** substituir uma prévia que estava tocando (eventos reais de `timeupdate`) não alterou a nova. A nova prévia ficou em 0:00,000, sem erro, e o único registro de posição salvo é o dela. Verificado em `c843c0b` e na correção.
+- **Defeito encontrado no caminho:** o card focado após o corte perdia o foco quando o polling o recriava por mudança de progresso; o teste antigo só passava por tempo. Agora o foco passa ao card novo.
+
+## Checks finais executados
+
+| Comando | Resultado |
+|---|---|
+| `uv run pytest -q` | **234 passed, 1 warning in 246.63s** |
+| `uv run ruff check instazap tests scripts` | All checks passed! |
+| `uv run --group browser python scripts/smoke.py --browser --port 8872` | HTTP PASS ×2, BROWSER MANUAL PASS, BROWSER TIMELINE PASS, BROWSER PASS; servidor encerrado |
+
+Warning já existente (httpx/TestClient). **Limitações:** toda a mídia é sintética e nenhum link real de Instagram foi baixado. O navegador testado foi só o Chromium; Safari/Firefox, aparelho físico e WhatsApp não foram testados. A tolerância de imagem (±1/60 s) vale para origens até 30 fps; acima disso, a conversão para 30 fps descarta quadros e o quadro exibido é o que a parte terá. A preparação da prévia adiciona uma codificação. A Matroska com −0,5 s de offset testada não tem timestamps de quadro e é recusada com mensagem, antes e depois da correção.
+
+---
+
+# Registro anterior: corte manual com player — 22/10/2026
 
 Worktree `corte-manual-player`, branch `feat/corte-manual-player`, a partir de `origin/main` `608288c` (independente de outras branches). Sem push, PR, merge ou deploy. O servidor em 8765 e outros worktrees não foram tocados; smoke somente em `127.0.0.1:8872`, encerrado pelo script (nenhum listener restante). Linux, Python 3.14, ffmpeg/ffprobe 6.1.1, um thread de ffmpeg, sem execução paralela de testes.
 

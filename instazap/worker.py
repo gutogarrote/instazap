@@ -4,7 +4,7 @@ import threading
 import time
 import zipfile
 
-from .media import measure, split
+from .media import prepare_preview, split
 from .process import run
 
 
@@ -33,8 +33,10 @@ class Worker:
         terminal = False
         # A manual job runs twice: prepare (fetch + measure, then wait for the user), then cut.
         preparing = job['mode'] == 'manual' and job['cut_start'] is None
-        fetch = job['kind'] == 'link' and (job['mode'] == 'full' or preparing)
+        # No URL left on a manual job means its source is already here (re-preparing an old preview).
+        fetch = job['kind'] == 'link' and job['url'] is not None and (job['mode'] == 'full' or preparing)
         stage = 'download' if fetch else 'split'
+        preview = folder / 'preview.mp4'
         try:
             if fetch:
                 # URL is not written to logs or retained after completion.
@@ -43,13 +45,14 @@ class Worker:
                 except Exception as exc:
                     raise ValueError('Não foi possível obter este link público (bloqueio, login ou formato indisponível). Use “Enviar arquivo”.') from exc
             if preparing:
-                stage = 'measure'
-                duration = measure(source, cancel=self.cancel)
+                stage = 'preview'
+                duration = prepare_preview(source, preview, cancel=self.cancel)
                 # Never split here: the source waits for the user's explicit cut.
                 self.store.update(job['id'], state='awaiting_cut', progress=100, source_duration=duration,
                                   url=None, expires=self.store.preview_expiry(job['created']))
                 return True
             stage = 'split'
+            preview.unlink(missing_ok=True)  # The cut is chosen; only the source is needed now.
             parts = split(source, folder, lambda i, n: self.store.update(job['id'], progress=10 + int(i / n * 80)), cancel=self.cancel,
                           first_part_seconds=job['first_part_seconds'], cut_start=job['cut_start'])
             stage = 'archive'

@@ -194,15 +194,12 @@ def create_app(settings=None):
 
     @app.get('/api/jobs/{job_id}/source')
     def source(request: Request, job_id: str):
-        # Only the owner's preview, only while it waits for a cut. FileResponse serves Range.
+        # Only the owner's normalized preview, only while it waits for a cut. FileResponse serves Range.
         job = find(request, job_id)
-        path = store.files / job_id / 'source'
+        path = store.files / job_id / 'preview.mp4'
         if job['state'] != 'awaiting_cut' or not path.is_file():
             raise HTTPException(404, 'Prévia indisponível.')
-        with path.open('rb') as handle:
-            head = handle.read(12)
-        media_type = 'video/webm' if head.startswith(b'\x1a\x45\xdf\xa3') else 'video/mp4'
-        return FileResponse(path, media_type=media_type, content_disposition_type='inline')
+        return FileResponse(path, media_type='video/mp4', content_disposition_type='inline')
 
     @app.post('/api/jobs/{job_id}/cut', status_code=202)
     async def cut(request: Request, job_id: str):
