@@ -7,7 +7,7 @@ root = Path(__file__).resolve().parents[1]
 os.chdir(root)
 settings = root / '.env'
 allowed = {'INSTAZAP_BIND', 'INSTAZAP_PORT', 'INSTAZAP_DATA', 'INSTAZAP_ACCESS_SECRET',
-           'INSTAZAP_SECURE_COOKIE', 'INSTAZAP_ORIGIN'}
+           'INSTAZAP_SECURE_COOKIE', 'INSTAZAP_ORIGIN', 'INSTAZAP_COOKIE_NAME'}
 if settings.exists():
     for raw in settings.read_text().splitlines():
         line = raw.strip()

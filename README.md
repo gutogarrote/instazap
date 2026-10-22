@@ -48,6 +48,8 @@ uv run uvicorn instazap.app:app --host 127.0.0.1 --port 8765 --workers 1 --limit
 
 Para acessar do celular, prefira Tailscale/VPN já configurada. Em `.env`, defina `INSTAZAP_BIND` com o **IP privado Tailscale do host** e `INSTAZAP_ORIGIN=http://IP-PRIVADO:8765`. O app não instala VPN nem altera a rede. HTTP na VPN funciona com `INSTAZAP_SECURE_COOKIE=0`; isso não deve ser usado em HTTP aberto na internet.
 
+Previews paralelos no mesmo IP Tailscale precisam de nomes de cookie distintos: portas não isolam cookies. Preserve o padrão `instazap_session` na instância existente e configure `INSTAZAP_COOKIE_NAME=instazap_preview_a` (outro nome em cada preview), via ambiente ou `.env`, além de portas e `INSTAZAP_DATA` separados. Use um token ASCII válido, sem espaços/separadores; nomes inválidos impedem a inicialização. Trocar o nome exige uma nova sessão nessa instância.
+
 ## Docker Compose
 
 ```bash
