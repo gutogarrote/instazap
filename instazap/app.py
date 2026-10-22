@@ -45,7 +45,7 @@ def create_app(settings=None):
     app.state.store, app.state.worker = store, worker
 
     def token(request):
-        value = request.cookies.get('instazap_session', '')
+        value = request.cookies.get(settings.cookie_name, '')
         if not store.session(value):
             raise HTTPException(401, 'Sessão expirada. Recarregue a página para começar novamente.')
         return value
@@ -88,12 +88,12 @@ def create_app(settings=None):
 
     @app.get('/api/session')
     def session(request: Request, response: Response):
-        value = request.cookies.get('instazap_session', '')
+        value = request.cookies.get(settings.cookie_name, '')
         if not store.session(value):
             if settings.access_secret and not secrets.compare_digest(request.headers.get('x-access-secret', ''), settings.access_secret):
                 raise HTTPException(401, 'Digite a chave de acesso deste Instazap.')
             value = store.new_session()
-            response.set_cookie('instazap_session', value, max_age=7 * 86400, httponly=True,
+            response.set_cookie(settings.cookie_name, value, max_age=7 * 86400, httponly=True,
                                 secure=settings.secure_cookie, samesite='strict', path='/')
         return {'csrf': csrf(value), 'max_bytes': settings.max_bytes}
 
