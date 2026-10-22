@@ -1,12 +1,15 @@
 import hashlib
 import json
+import math
 import secrets
 import shutil
 import sqlite3
 import time
 from contextlib import contextmanager
 
-from .media import validate_first_part
+from .media import validate_cut, validate_first_part
+
+PENDING = "('receiving','queued','processing','awaiting_cut')"
 
 
 class Busy(ValueError):
@@ -33,9 +36,18 @@ class Store:
 
             # Additive migration: old jobs keep the original 60-second behavior.
             db.execute('BEGIN IMMEDIATE')
-            if 'first_part_seconds' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
+            columns = {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}
+            if 'first_part_seconds' not in columns:
                 db.execute('ALTER TABLE jobs ADD COLUMN first_part_seconds INTEGER NOT NULL DEFAULT 60 '
                            'CHECK(first_part_seconds IN (30,60))')
+            # Manual mode: old jobs are 'full'; cut/duration stay NULL until measured/chosen.
+            if 'mode' not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'full' "
+                           "CHECK(mode IN ('full','manual'))")
+            if 'source_duration' not in columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN source_duration REAL')
+            if 'cut_start' not in columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN cut_start REAL')
 
     @contextmanager
     def db(self):
@@ -64,14 +76,17 @@ class Store:
             db.execute('INSERT INTO sessions VALUES (?,?)', (self.digest(token), time.time() + 7 * 86400))
         return token
 
-    def create(self, owner, kind, url=None, first_part_seconds=60):
+    def create(self, owner, kind, url=None, first_part_seconds=60, mode='full'):
         validate_first_part(first_part_seconds)
+        if mode not in ('full', 'manual'):
+            raise ValueError('Modo inválido.')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
-            if db.execute("SELECT count(*) FROM jobs WHERE owner=? AND state IN ('receiving','queued','processing')", (owner,)).fetchone()[0]:
-                raise Busy('Você já tem um vídeo na fila. Aguarde ou exclua a tarefa pendente.')
+            # A preview awaiting its cut holds a source and a future output reservation.
+            if db.execute(f"SELECT count(*) FROM jobs WHERE owner=? AND state IN {PENDING}", (owner,)).fetchone()[0]:
+                raise Busy('Você já tem um vídeo na fila ou aguardando o corte. Conclua ou exclua essa tarefa.')
             count = db.execute('SELECT count(*) FROM jobs').fetchone()[0]
-            pending = db.execute("SELECT count(*) FROM jobs WHERE state IN ('receiving','queued','processing')").fetchone()[0]
+            pending = db.execute(f'SELECT count(*) FROM jobs WHERE state IN {PENDING}').fetchone()[0]
             usage = sum(f.stat().st_size for f in self.files.rglob('*') if f.is_file())
             if (count >= self.settings.max_jobs or
                     usage + (pending + 1) * 450_000_000 > self.settings.disk_budget or
@@ -79,9 +94,10 @@ class Store:
                 raise Busy('Armazenamento ou fila cheia. Exclua arquivos antigos ou tente mais tarde.')
             job_id = secrets.token_hex(16)
             now = time.time()
-            db.execute('INSERT INTO jobs(id,owner,state,created,expires,kind,url,first_part_seconds) VALUES (?,?,?,?,?,?,?,?)',
+            db.execute('INSERT INTO jobs(id,owner,state,created,expires,kind,url,first_part_seconds,mode) '
+                       'VALUES (?,?,?,?,?,?,?,?,?)',
                        (job_id, owner, 'receiving' if kind == 'upload' else 'queued', now,
-                        now + self.settings.ttl, kind, url, first_part_seconds))
+                        now + self.settings.ttl, kind, url, first_part_seconds, mode))
             (self.files / job_id).mkdir(mode=0o700)
         return job_id
 
@@ -101,6 +117,36 @@ class Store:
             return [dict(r) for r in db.execute('SELECT * FROM jobs WHERE owner=? AND expires>? ORDER BY created DESC',
                                                (owner, time.time()))]
 
+    def preview_expiry(self, created):
+        return min(time.time() + self.settings.preview_ttl, created + self.settings.preview_max)
+
+    def touch_previews(self, owner):
+        # An open page keeps its source; refresh rarely, so expiry is not new data every poll.
+        now = time.time()
+        with self.db() as db:
+            db.execute("UPDATE jobs SET expires=min(?+?, created+?) WHERE owner=? AND state='awaiting_cut' "
+                       'AND expires>? AND expires<?',
+                       (now, self.settings.preview_ttl, self.settings.preview_max, owner, now,
+                        now + self.settings.preview_ttl / 2))
+
+    def choose_cut(self, job_id, owner, start):
+        """Atomically queue one cut: 'queued', 'same' (idempotent retry), 'pending', 'conflict' or None."""
+        start = validate_cut(start, math.inf)  # Type first: True must not equal a stored 1.0.
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT state, cut_start, source_duration FROM jobs WHERE id=? AND owner=? '
+                             "AND mode='manual' AND expires>?", (job_id, owner, time.time())).fetchone()
+            if not row:
+                return None
+            if row['state'] != 'awaiting_cut':
+                if row['cut_start'] is None:
+                    return 'pending'
+                return 'same' if row['cut_start'] == start else 'conflict'
+            validate_cut(start, row['source_duration'])
+            db.execute("UPDATE jobs SET state='queued', progress=0, cut_start=?, expires=? WHERE id=?",
+                       (start, time.time() + self.settings.ttl, job_id))
+            return 'queued'
+
     def claim(self):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -119,7 +165,10 @@ class Store:
     def cleanup(self):
         now = time.time()
         with self.db() as db:
+            # Select and delete together: a cut or touch that extends a row first keeps it.
+            db.execute('BEGIN IMMEDIATE')
             ids = [r[0] for r in db.execute('SELECT id FROM jobs WHERE expires<=?', (now,))]
+            db.execute('DELETE FROM jobs WHERE expires<=?', (now,))
             db.execute('DELETE FROM sessions WHERE expires<=?', (now,))
         for job_id in ids:
             self.remove(job_id)

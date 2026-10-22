@@ -12,7 +12,7 @@ from starlette.requests import ClientDisconnect
 
 from .config import Settings
 from .network import original_url
-from .media import validate_first_part
+from .media import cut_plan, validate_first_part
 from .store import Busy, Store
 from .worker import Worker
 
@@ -99,10 +99,11 @@ def create_app(settings=None):
 
     @app.get('/api/jobs')
     def jobs(request: Request):
-        return [store.public(j) for j in store.listing(owner(request))]
+        user = owner(request)
+        store.touch_previews(user)  # Polling page = the player is still waiting for a choice.
+        return [store.public(j) for j in store.listing(user)]
 
-    @app.post('/api/jobs/link', status_code=202)
-    async def link(request: Request):
+    async def read_json(request, too_large):
         # Bound request body before JSON parsing; stream enforcement also for chunked requests.
         body = bytearray()
         try:
@@ -110,18 +111,37 @@ def create_app(settings=None):
                 async for chunk in request.stream():
                     body.extend(chunk)
                     if len(body) > 2048:
-                        raise HTTPException(413, 'Link muito grande.')
+                        raise HTTPException(413, too_large)
         except TimeoutError as exc:
-            raise HTTPException(408, 'Tempo limite ao receber o link. Tente novamente.') from exc
+            raise HTTPException(408, 'Tempo limite ao receber os dados. Tente novamente.') from exc
         import json
+
+        def constant(name):
+            raise ValueError('Número inválido.')
         try:
-            data = json.loads(body)
+            data = json.loads(body, parse_constant=constant)
+        except ValueError as exc:
+            raise HTTPException(400, 'Dados inválidos.') from exc
+        if not isinstance(data, dict):
+            raise HTTPException(400, 'Dados inválidos.')
+        return data
+
+    def mode(value):
+        if type(value) is not str or value not in ('full', 'manual'):
+            raise ValueError('Modo inválido: use o vídeo inteiro ou o corte manual.')
+        return value
+
+    @app.post('/api/jobs/link', status_code=202)
+    async def link(request: Request):
+        data = await read_json(request, 'Link muito grande.')
+        try:
             url = original_url(data.get('url'))
             first_part_seconds = validate_first_part(data.get('first_part_seconds', 60))
+            chosen = mode(data.get('mode', 'full'))
         except (ValueError, AttributeError) as exc:
             raise HTTPException(400, str(exc)) from exc
         try:
-            job_id = store.create(owner(request), 'link', url, first_part_seconds=first_part_seconds)
+            job_id = store.create(owner(request), 'link', url, first_part_seconds=first_part_seconds, mode=chosen)
         except Busy as exc:
             raise HTTPException(429, str(exc)) from exc
         return {'id': job_id}
@@ -132,7 +152,11 @@ def create_app(settings=None):
         if raw not in ('30', '60'):
             raise HTTPException(400, 'A primeira parte deve ter 30 ou 60 segundos.')
         try:
-            job_id = store.create(owner(request), 'upload', first_part_seconds=int(raw))
+            chosen = mode(request.headers.get('x-mode', 'full'))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            job_id = store.create(owner(request), 'upload', first_part_seconds=int(raw), mode=chosen)
         except Busy as exc:
             raise HTTPException(429, str(exc)) from exc
         source = store.files / job_id / 'source'
@@ -167,6 +191,39 @@ def create_app(settings=None):
                 worker.cancel.set()
             store.remove(job_id)
         return Response(status_code=204)
+
+    @app.get('/api/jobs/{job_id}/source')
+    def source(request: Request, job_id: str):
+        # Only the owner's preview, only while it waits for a cut. FileResponse serves Range.
+        job = find(request, job_id)
+        path = store.files / job_id / 'source'
+        if job['state'] != 'awaiting_cut' or not path.is_file():
+            raise HTTPException(404, 'Prévia indisponível.')
+        with path.open('rb') as handle:
+            head = handle.read(12)
+        media_type = 'video/webm' if head.startswith(b'\x1a\x45\xdf\xa3') else 'video/mp4'
+        return FileResponse(path, media_type=media_type, content_disposition_type='inline')
+
+    @app.post('/api/jobs/{job_id}/cut', status_code=202)
+    async def cut(request: Request, job_id: str):
+        data = await read_json(request, 'Dados muito grandes.')
+        user = owner(request)
+        start = data.get('start')
+        try:
+            result = store.choose_cut(job_id, user, start)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if result is None:
+            raise HTTPException(404, 'Tarefa não encontrada ou expirada.')
+        if result == 'pending':
+            raise HTTPException(409, 'A prévia ainda está sendo preparada. Aguarde.')
+        if result == 'conflict':
+            raise HTTPException(409, 'Este vídeo já foi cortado em outro ponto. Veja o resultado abaixo.')
+        job = store.get(job_id, user)
+        if not job:
+            raise HTTPException(404, 'Tarefa não encontrada ou expirada.')
+        plan = cut_plan(job['cut_start'], job['source_duration'])
+        return store.public(job) | {'plan': [{'start': float(o), 'duration': float(d)} for o, d in plan]}
 
     @app.get('/api/jobs/{job_id}/files/{name}')
     def file(request: Request, job_id: str, name: str):

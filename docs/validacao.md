@@ -1,4 +1,39 @@
-# Validação: cortes de mídia real do Instagram — 21/10/2026
+# Validação: corte manual com player — 22/10/2026
+
+Worktree `corte-manual-player`, branch `feat/corte-manual-player`, a partir de `origin/main` `608288c` (independente de outras branches). Sem push, PR, merge ou deploy. O servidor em 8765 e outros worktrees não foram tocados; smoke somente em `127.0.0.1:8872`, encerrado pelo script (nenhum listener restante). Linux, Python 3.14, ffmpeg/ffprobe 6.1.1, um thread de ffmpeg, sem execução paralela de testes.
+
+## Checks finais executados
+
+| Comando | Resultado |
+|---|---|
+| `uv sync --frozen` | Sucesso com o lock existente |
+| `uv run pytest -q` | **227 passed, 1 warning in 183.34s** |
+| `uv run ruff check instazap tests scripts` | All checks passed! |
+| `uv run python scripts/smoke.py --port 8872` | HTTP PASS (upload 60+1,2) e HTTP PASS manual (corte 17,4 s → 61,6 + 61,6 s); servidor encerrado |
+| `uv run --group browser python scripts/smoke.py --browser --port 8872` | HTTP PASS ×2, BROWSER MANUAL PASS, BROWSER PASS; servidor encerrado |
+
+Warning já existente: depreciação de httpx no TestClient do Starlette. Chromium em cache reutilizado, sem instalação. `pip-audit` não foi reexecutado: dependências inalteradas.
+
+## O que foi provado e o que não foi
+
+**Toda a mídia é sintética** (ffmpeg local). O downloader de link é substituído por cópia de arquivo local: em pytest, via monkeypatch; no smoke, por `scripts/smoke_server.py` (só para teste). Isso prova o fluxo HTTP, a fila, a persistência e o processamento real com ffmpeg. **Não prova download de nenhum link real de Instagram**; nenhum acesso a redes sociais foi feito nesta entrega. Falha do downloader e erro de mídia são testados separadamente e mostram mensagens diferentes.
+
+Regressões automatizadas (`tests/test_manual_cut.py`):
+
+- Planejamento exato: restantes 0,04; 29,9; 59,99; 60; 75,5; 90; 90,01; 105,4; 119,99; 120; 120,01; 150; 179,99; 180; 180,01; 225 e 240 s, com corte em 0 e em 17,5 s. Mais 4.000 cortes fracionários aleatórios (semente fixa): menor número de partes, soma exata, nenhuma vazia, todas ≤90 s, ≥60 s quando viável, cada uma a menos de um quadro de restante/partes, fronteiras na grade de 30 fps. Casos de borda: `17,4` não perde um quadro por ruído binário; `140,6 − 17,4` dá 61,6 + 61,6; corte a 0,5 µs do fim não gera plano vazio.
+- Validação estrita: NaN, ±Infinity, 1e400, inteiro de 400 dígitos, booleanos, strings, null, listas, negativos, igual/além da duração, JSON inválido e corpo >2 KB. A tarefa continua aguardando e sem corte. Depois do corte, `true` continua 400 (não é tratado como retry de `1`).
+- ffmpeg real com chirp e quadro marcador: restante <60 s (47,3 s, corte 17,4 → 29,9 s); 29,97 fps com corte fracionário 17,43 em 150,2 s; restante de 105,4 s (2 × 52,7); múltiplo exato (2 × 90,000 s); áudio mais longo e vídeo mais longo; sem áudio; um quadro antes do fim. Cada parte é decodificada independentemente, com tetos de faixa/contêiner, início em zero, primeiro quadro igual ao quadro exibido no corte, PCM correlacionado (>0,95) no início, nas junções e na cauda, introdução ausente (correlação <0,3 com o início da origem) e contagem de amostras exata nas fronteiras internas.
+- API: aguarda o corte sem dividir, URL apagada após a medição, Range 206 da prévia, isolamento entre sessões, CSRF/origem, 409 antes da prévia pronta, retry idempotente, 409 para outro valor, corrida de 8 threads com conexões SQLite separadas (exatamente um vencedor) e 5 POSTs concorrentes, TTL deslizante e teto, expiração (acesso bloqueado e limpeza física), corte que estende o prazo antes da limpeza, reinício com prévia aguardando e com corte interrompido, upload manual, modo inválido, banco antigo migrado com tarefas pendentes/prontas em modo `full`.
+
+Navegador (Chromium, `scripts/smoke.py --browser`): 390×844 com toque e 1440×1000 com mouse. Toque real (tap e arrasto via eventos de toque do Chrome DevTools), arrasto de mouse, teclado (seta = 1 quadro, PageDown = 1 s), botões de quadro e tempo digitado `17,4`. O player ocupa ≥374 px dos 390 px; barra, botões e ações têm ≥44 px. Status visível antes da resposta do POST e sem POST duplicado. Polling por 4,5 s mantém o mesmo elemento de vídeo, src e posição. Reload restaura prévia, modo e posição (`0:17,433`). Rejeição 400 e falha de rede restauram os controles. Cliques repetidos (inclusive reabilitando o botão via script) enviam um só corte. Uma resposta antiga de polling não ressuscita a prévia. O corte por arrasto (35,183083 s) gera 52,7 + 52,733 s, com conteúdo verificado e explicação “menos de 60 s”. Também passam: falha de reprodução da prévia, troca de link (a prévia antiga é apagada e o player troca de fonte), descartar e falha do downloader. A captura mostrou no player o quadro 00:00:35.167 para a posição 0:35,183, como esperado.
+
+Correção encontrada pelos testes: com timescale de filme MP4 padrão (1/1000 s), a lista de edição truncava o áudio de fronteiras fracionárias (ex.: 48,93333 → 48,933 s, 16 amostras perdidas por junção). As saídas agora usam timescale 48000; as fronteiras inteiras do modo antigo não eram afetadas.
+
+**Limitações:** sem validação com link real de Instagram, WhatsApp em aparelho físico, Safari/iOS, Firefox, Docker ou CI remoto. A posição vem do relógio do player; para contêineres com início deslocado pode haver diferença desse deslocamento. Codecs não reproduzíveis no navegador mostram aviso (tempo digitado continua possível). O toque foi emulado no Chromium, não testado em um celular.
+
+---
+
+# Registro anterior: cortes de mídia real do Instagram — 21/10/2026
 
 Worktree `cortes-instagram`, branch `fix/cortes-instagram`, base publicada `fac4bdb`. UI, persistência e primeira parte de 30/60 s aprovadas foram preservadas. Sem push, PR, merge ou deploy; preview 8765 preservado. Smoke somente em `127.0.0.1:8766`, encerrado pelo script. Linux, Python 3.14.5, ffmpeg/ffprobe 6.1.1; subprocessos de mídia com um thread de decodificação/filtros/encoder e os limites existentes, sem mudanças globais.
 

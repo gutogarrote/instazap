@@ -1,9 +1,13 @@
 """Real local HTTP + optional mobile browser smoke. All media are SYNTHETIC TEST fixtures.
-Run: uv run python scripts/smoke.py [--browser]
-Owns only a temporary server at 127.0.0.1:8766; never connects to social networks.
+Run: uv run python scripts/smoke.py [--browser] [--port 8766]
+Owns only a temporary server at 127.0.0.1:<port>; never connects to social networks.
+The server is scripts/smoke_server.py: the real app, with the link downloader replaced by
+a copy of a synthetic local file. Link results prove local processing, never Instagram.
 """
 import argparse
+import array
 import json
+import math
 import os
 import socket
 import subprocess
@@ -16,6 +20,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 'http://127.0.0.1:8766'
+LINK_SECONDS = 140.6  # Synthetic "reel" returned by the test-only downloader.
 
 
 def fixture(path):
@@ -25,7 +30,101 @@ def fixture(path):
                     '-preset', 'ultrafast', '-c:a', 'aac', '-t', '61.2', str(path)], check=True)
 
 
-def browser_smoke(source):
+def link_fixture(path):
+    # A chirp: every instant has its own frequency, so misplaced audio cannot correlate.
+    d = LINK_SECONDS
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i', f'testsrc2=s=96x64:r=30:d={d}',
+                    '-f', 'lavfi', '-i', f'aevalsrc=0.3*sin(2*PI*(300*t+3*t*t)):s=48000:d={d}',
+                    '-threads', '1', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+                    '-c:a', 'aac', '-t', str(d), str(path)], check=True)
+
+
+def pcm(path):
+    # Trim to the declared audio duration: AAC decoders also emit the final frame's padding.
+    data = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_streams', '-of', 'json', str(path)]))
+    audio = next(s for s in data['streams'] if s['codec_type'] == 'audio')
+    return array.array('h', subprocess.check_output([
+        'ffmpeg', '-nostdin', '-v', 'error', '-threads', '1', '-i', str(path), '-vn',
+        '-af', f"atrim=duration={audio['duration']}", '-ac', '1', '-ar', '48000', '-f', 's16le', '-']))
+
+
+def correlation(a, b):
+    return sum(x * y for x, y in zip(a, b, strict=True)) / math.sqrt(sum(x * x for x in a) * sum(y * y for y in b))
+
+
+def check_cut_outputs(source, files, cut, plan=None):
+    """Content, not only duration sums: audio from the chosen point to the end, intro excluded."""
+    start = math.floor(round(cut * 1e6) * 30 / 1e6) / 30
+    remainder = LINK_SECONDS - start
+    count = max(1, math.ceil((remainder - 1e-7) / 90))
+    durations = []
+    for path in files:
+        data = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_format', '-show_streams',
+                                                   '-of', 'json', str(path)]))
+        durations.append(float(data['format']['duration']))
+        assert all(float(s['duration']) <= 90 for s in data['streams']), data
+    assert len(files) == count, (files, count)
+    assert all(0 < d <= 90 for d in durations), durations
+    assert all(abs(d - remainder / count) <= 1 / 30 + .002 for d in durations), durations
+    assert abs(sum(durations) - remainder) <= 1 / 30 + .002, (durations, remainder)
+    if plan:
+        assert [round(p['duration'], 3) for p in plan] == [round(d, 3) for d in durations], (plan, durations)
+    original, joined = pcm(source), array.array('h')
+    for path in files:
+        joined.extend(pcm(path))
+    offset = round(start * 48000)
+    for at in (0, round(durations[0] * 48000) - 960, len(original) - offset - 2400):
+        assert correlation(original[offset + at:offset + at + 1920], joined[at:at + 1920]) > .95, at
+    assert abs(correlation(original[:1920], joined[:1920])) < .3, 'intro was generated'
+    return durations
+
+
+def manual_http(client, source):
+    response = client.post('/api/jobs/link', json={'url': 'https://www.instagram.com/reel/SYNTHETICHTTP/',
+                                                   'mode': 'manual'})
+    assert response.status_code == 202, response.text
+    job_id = response.json()['id']
+    for _ in range(240):
+        job = client.get(f'/api/jobs/{job_id}').json()
+        if job['state'] in ('awaiting_cut', 'error'):
+            break
+        time.sleep(.25)
+    assert job['state'] == 'awaiting_cut' and job['parts'] == [], job
+    assert abs(job['source_duration'] - LINK_SECONDS) < .05, job
+    time.sleep(2.5)  # The worker idles: no split before the user's explicit cut.
+    assert client.get(f'/api/jobs/{job_id}').json()['state'] == 'awaiting_cut'
+    ranged = client.get(f'/api/jobs/{job_id}/source', headers={'Range': 'bytes=0-99'})
+    assert ranged.status_code == 206 and len(ranged.content) == 100, ranged.status_code
+    assert ranged.headers['content-type'] == 'video/mp4'
+    for bad in ['{"start":NaN}', '{"start":Infinity}', '{"start":true}', '{"start":"17.4"}', '{"start":-0.5}',
+                json.dumps({'start': job['source_duration']}), '{"start":null}', '[]']:
+        response = client.post(f'/api/jobs/{job_id}/cut', content=bad, headers={'content-type': 'application/json'})
+        assert response.status_code == 400, (bad, response.status_code)
+    first = client.post(f'/api/jobs/{job_id}/cut', json={'start': 17.4})
+    assert first.status_code == 202, first.text
+    plan = first.json()['plan']
+    assert client.post(f'/api/jobs/{job_id}/cut', json={'start': 17.4}).status_code == 202  # Retry: same job.
+    assert client.post(f'/api/jobs/{job_id}/cut', json={'start': 20}).status_code == 409
+    assert len(client.get('/api/jobs').json()) == 1
+    for _ in range(480):
+        job = client.get(f'/api/jobs/{job_id}').json()
+        if job['state'] in ('ready', 'error'):
+            break
+        time.sleep(.25)
+    assert job['state'] == 'ready', job
+    assert client.get(f'/api/jobs/{job_id}/source').status_code == 404
+    files = []
+    for part in job['parts']:
+        target = source.parent / f'http-{part["name"]}'
+        target.write_bytes(client.get(f"/api/jobs/{job_id}/files/{part['name']}").content)
+        files.append(target)
+    durations = check_cut_outputs(source, files, 17.4, plan)
+    assert client.delete(f'/api/jobs/{job_id}').status_code == 204
+    print(f'HTTP PASS: synthetic link → awaiting cut (no auto split) → Range preview → strict cut validation '
+          f'→ cut 17.4 s → equal parts {durations} → content from cut point, intro excluded')
+
+
+def browser_smoke(source, link):
     from playwright.sync_api import sync_playwright
     artifacts = ROOT / 'artifacts'
     artifacts.mkdir(exist_ok=True)
@@ -125,8 +224,8 @@ def browser_smoke(source):
         assert page.locator('.part').count() == 2
         assert page.locator('.part p').all_text_contents() == ['Parte 1 de 2 · 30.0 s', 'Parte 2 de 2 · 31.2 s']
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-        page.locator('video').first.evaluate('(v) => { window.originalPreview=v; v.preload="auto"; v.load(); }')
-        page.wait_for_function('() => document.querySelector("video").readyState >= 2')
+        page.locator(".part video").first.evaluate('(v) => { window.originalPreview=v; v.preload="auto"; v.load(); }')
+        page.wait_for_function('() => document.querySelector(".part video").readyState >= 2')
         # Polling another job must retain the existing preview node and playback state.
         jobs = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')
         fake.update(state='processing', error=None)
@@ -136,7 +235,7 @@ def browser_smoke(source):
         fake['progress'] = 75
         expect(page.locator('.job-status').last).to_contain_text('75%', timeout=10000)
         assert page.evaluate('scrollY') == scroll_before_poll
-        assert page.evaluate('window.originalPreview === document.querySelector("video") && window.originalPreview.readyState >= 2')
+        assert page.evaluate('window.originalPreview === document.querySelector(".part video") && window.originalPreview.readyState >= 2')
         page.unroute('**/api/jobs')
         for index, duration in [(1, 30), (2, 31.2)]:
             with page.expect_download() as pending:
@@ -159,9 +258,242 @@ def browser_smoke(source):
         page.screenshot(path=str(artifacts / 'desktop.png'), full_page=True)
         page.get_by_role('button', name='Excluir agora').click()
         page.wait_for_function('() => document.querySelectorAll(".job").length === 0')
+        context.close()
+        manual_browser(browser, errors, artifacts, link)
         assert errors == [], errors
         browser.close()
     print('BROWSER PASS: mobile/desktop order, delayed link/upload busy feedback, duplicate guard, 30/60 transmission, rejection recovery, synthetic link stages, real 30-first upload/downloads, stable previews, reload/delete')
+
+
+def manual_browser(browser, errors, artifacts, link):
+    from playwright.sync_api import expect
+
+    def position(page):
+        return page.evaluate('() => Number(document.querySelector("#cut-range").value)')
+
+    def seeked(page):
+        page.wait_for_function('() => { const v = document.querySelector("#cutter-video"); '
+                               'return !v.seeking && Math.abs(v.currentTime - Number(document.querySelector("#cut-range").value)) < .02; }')
+
+    def range_x(page, fraction):
+        # Native range: the thumb centre travels between half-thumb insets on both ends.
+        box = page.locator('#cut-range').bounding_box()
+        inset = 8
+        return box['x'] + inset + (box['width'] - 2 * inset) * fraction, box['y'] + box['height'] / 2
+
+    # Phone: explicit mode choice, delayed feedback, touch timeline, exact controls, reload, cut.
+    context = browser.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True, has_touch=True,
+                                  accept_downloads=True)
+    page = context.new_page()
+    page.on('pageerror', lambda exc: errors.append(str(exc)))
+    page.goto(BASE)
+    page.get_by_text('Continuar de onde parei').tap()
+    expect(page.locator('#first-part-control')).to_be_hidden()
+    button = page.get_by_role('button', name='Carregar vídeo pelo link para escolher o corte')
+    held = []
+    page.route('**/api/jobs/link', lambda route: held.append(route))
+    page.locator('#url').fill('https://www.instagram.com/reel/SLOWSYNTH1/?igsh=test')
+    button.tap()
+    expect(page.locator('#submission-message')).to_contain_text('Aguarde… recebendo o link')
+    expect(button).to_be_disabled()
+    page.wait_for_timeout(300)
+    assert len(held) == 1 and held[0].request.post_data_json == {
+        'url': 'https://www.instagram.com/reel/SLOWSYNTH1/?igsh=test', 'mode': 'manual'}
+    page.locator('#link-form').evaluate('(f) => f.dispatchEvent(new Event("submit", {cancelable:true}))')
+    page.wait_for_timeout(100)
+    assert len(held) == 1, 'Duplicate load during pending request'
+    held[0].continue_()
+    page.unroute('**/api/jobs/link')
+    expect(page.locator('#cutter-message')).to_contain_text('Baixando e medindo')
+    assert page.locator('#cutter').evaluate('(e) => e.getBoundingClientRect().top < innerHeight')
+    expect(page.locator('#cutter-message')).to_contain_text('Prévia pronta', timeout=60000)
+    expect(button).to_be_enabled()
+    duration = page.evaluate('() => Number(document.querySelector("#cut-range").max)')
+    assert abs(duration - LINK_SECONDS) < .06, duration
+    video = page.locator('#cutter-video').bounding_box()
+    assert video['width'] >= 390 - 16 and video['x'] >= 0 and video['x'] + video['width'] <= 390, video
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    for selector in ['#cut-range', '#cut-button', '#cutter-discard', '#cut-goto button',
+                     '.nudges button >> nth=0', '.nudges button >> nth=3']:
+        box = page.locator(selector).bounding_box()
+        assert box['height'] >= 44 and box['width'] >= 44, (selector, box)
+
+    # Real touch: tap, then a dragged touch sequence through the Chrome DevTools input pipeline.
+    page.touchscreen.tap(*range_x(page, .5))
+    assert abs(position(page) / duration - .5) < .06, position(page)
+    seeked(page)
+    cdp = context.new_cdp_session(page)
+    x, y = range_x(page, .2)
+    cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': x, 'y': y}]})
+    for step in range(1, 11):
+        x, y = range_x(page, .2 + .5 * step / 10)
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchMove', 'touchPoints': [{'x': x, 'y': y}]})
+    cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
+    assert abs(position(page) / duration - .7) < .06, position(page)
+    seeked(page)
+    expect(page.locator('#cut-time')).not_to_have_text('0:00,000')
+
+    # Exact typed time and frame steps; the visible timestamp and the player agree.
+    page.locator('#cut-input').fill('17,4')
+    page.get_by_role('button', name='Ir', exact=True).tap()
+    expect(page.locator('#cut-time')).to_have_text('0:17,400')
+    seeked(page)
+    expect(page.locator('#cut-plan')).to_contain_text('entre 60 e 90 s')
+    expect(page.locator('#cut-button')).to_have_text('Gerar partes a partir de 0:17,400')
+    page.get_by_role('button', name='Avançar um quadro').tap()
+    expect(page.locator('#cut-time')).to_have_text('0:17,433')
+
+    # Polling must not reset the player, its source or its position.
+    page.evaluate('() => { window.keptVideo = document.querySelector("#cutter-video"); '
+                  'window.keptSrc = window.keptVideo.currentSrc; }')
+    before = page.evaluate('() => document.querySelector("#cutter-video").currentTime')
+    page.wait_for_timeout(4500)
+    assert page.evaluate('() => window.keptVideo === document.querySelector("#cutter-video") && '
+                         'window.keptVideo.currentSrc === window.keptSrc')
+    assert abs(page.evaluate('() => document.querySelector("#cutter-video").currentTime') - before) < .001
+
+    # Reload: the waiting preview and chosen point come back; nothing was split meanwhile.
+    page.reload()
+    expect(page.locator('#cutter-message')).to_contain_text('Prévia pronta', timeout=30000)
+    expect(page.locator('#cut-time')).to_have_text('0:17,433')
+    seeked(page)
+    expect(page.locator('input[name="mode"][value="manual"]')).to_be_checked()
+    assert page.evaluate('() => fetch("/api/jobs").then(r => r.json())')[0]['state'] == 'awaiting_cut'
+
+    # Arbitrary fractional point by touch drag: about 25 % leaves 90-120 s, an honest <60 s split.
+    x, y = range_x(page, .4)
+    cdp = context.new_cdp_session(page)
+    cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': x, 'y': y}]})
+    for step in range(1, 9):
+        x, y = range_x(page, .4 - .15 * step / 8)
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchMove', 'touchPoints': [{'x': x, 'y': y}]})
+    cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
+    assert abs(position(page) / duration - .25) < .06, position(page)
+    page.get_by_role('button', name='Avançar um quadro').tap()
+    seeked(page)
+    remainder = duration - position(page)
+    assert 90 < remainder < 120, remainder
+    expect(page.locator('#cut-plan')).to_contain_text('menos de 60 s cada')
+    page.locator('#cutter').scroll_into_view_if_needed()
+    page.screenshot(path=str(artifacts / 'manual-mobile-cutter.png'))
+
+    # Rejection and network failure restore the controls on the same preview.
+    cut_button = page.locator('#cut-button')
+    page.route('**/api/jobs/*/cut', lambda route: route.fulfill(
+        status=400, content_type='application/json', body=json.dumps({'detail': 'Corte de teste rejeitado.'})))
+    cut_button.tap()
+    expect(page.locator('#cutter-error')).to_contain_text('Corte de teste rejeitado')
+    expect(cut_button).to_be_enabled()
+    page.unroute('**/api/jobs/*/cut')
+    page.route('**/api/jobs/*/cut', lambda route: route.abort('failed'))
+    cut_button.tap()
+    expect(page.locator('#cutter-error')).to_contain_text('Conexão interrompida')
+    expect(cut_button).to_be_enabled()
+    page.unroute('**/api/jobs/*/cut')
+
+    # Stale poll + repeated clicks: hold one listing and the cut, then answer the poll with old data.
+    snapshot = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')
+    stale, cuts = [], []
+
+    def hold_first(route):
+        if not stale and route.request.method == 'GET':
+            stale.append(route)
+        else:
+            route.continue_()
+    page.route('**/api/jobs', hold_first)
+    page.wait_for_timeout(2500)
+    assert stale, 'No poll was held'
+    page.route('**/api/jobs/*/cut', lambda route: cuts.append(route))
+    chosen = position(page)
+    cut_button.tap()
+    expect(page.locator('#cutter-message')).to_contain_text('Enviando o corte')
+    expect(cut_button).to_be_disabled()
+    cut_button.evaluate('(b) => { b.disabled = false; b.click(); b.click(); }')
+    page.wait_for_timeout(300)
+    assert len(cuts) == 1, 'Repeated clicks sent another cut'
+    assert cuts[0].request.post_data_json == {'start': chosen}
+    cuts[0].continue_()
+    expect(page.locator('#cutter')).to_be_hidden(timeout=10000)
+    stale[0].fulfill(json=snapshot)
+    page.wait_for_timeout(500)
+    expect(page.locator('#cutter')).to_be_hidden()
+    assert page.evaluate('() => !document.querySelector("#cutter-video").getAttribute("src")')
+    page.unroute('**/api/jobs')
+    page.unroute('**/api/jobs/*/cut')
+    expect(page.locator('.job').first).to_be_focused()
+    page.get_by_text('Pronto para o Status', exact=True).wait_for(timeout=180000)
+    expect(page.locator('.job').first).to_contain_text('somente dali até o fim')
+    expect(page.locator('.job').first).to_contain_text('Partes com menos de 60 s')
+    files = []
+    count = page.locator('.part').count()
+    for index in range(1, count + 1):
+        with page.expect_download() as pending:
+            page.get_by_role('link', name=f'Baixar parte {index}', exact=True).tap()
+        target = link.parent / f'browser-{index}.mp4'
+        pending.value.save_as(target)
+        files.append(target)
+    durations = check_cut_outputs(link, files, chosen)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=str(artifacts / 'manual-mobile.png'), full_page=True)
+    page.get_by_role('button', name='Excluir agora').tap()
+    page.wait_for_function('() => document.querySelectorAll(".job").length === 0')
+    context.close()
+
+    # Desktop: responsive width, mouse drag, preview failure, link replacement, discard, downloader failure.
+    context = browser.new_context(viewport={'width': 1440, 'height': 1000})
+    page = context.new_page()
+    page.on('pageerror', lambda exc: errors.append(str(exc)))
+    page.goto(BASE)
+    page.get_by_text('Continuar de onde parei').click()
+    page.route('**/api/jobs/*/source', lambda route: route.fulfill(status=200, content_type='video/mp4',
+                                                                     body=b'not a video'))
+    page.locator('#url').fill('https://www.instagram.com/reel/SYNTHA1/')
+    page.get_by_role('button', name='Carregar vídeo pelo link para escolher o corte').click()
+    expect(page.locator('#cutter-error')).to_contain_text('Não foi possível reproduzir a prévia', timeout=60000)
+    expect(page.locator('#cut-button')).to_be_enabled()
+    page.unroute('**/api/jobs/*/source')
+    old = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')[0]['id']
+    page.locator('#url').fill('https://www.instagram.com/reel/SYNTHB2/')
+    replace = page.get_by_role('button', name='Carregar vídeo pelo link para escolher o corte')
+    expect(replace).to_have_text('Trocar vídeo →')
+    replace.click()
+    expect(page.locator('#cutter-message')).to_contain_text('Prévia pronta', timeout=60000)
+    jobs = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')
+    assert len(jobs) == 1 and jobs[0]['id'] != old and jobs[0]['state'] == 'awaiting_cut', jobs
+    assert jobs[0]['id'] in page.evaluate('() => document.querySelector("#cutter-video").currentSrc')
+    expect(page.locator('#cutter-error')).to_be_hidden()
+    video = page.locator('#cutter-video').bounding_box()
+    panel = page.locator('.panel').bounding_box()
+    assert 600 < video['width'] <= panel['width'] and video['height'] <= 1000 * .7 + 1, (video, panel)
+    x, y = range_x(page, .1)
+    page.mouse.move(x, y)
+    page.mouse.down()
+    x, y = range_x(page, .6)
+    page.mouse.move(x, y, steps=12)
+    page.mouse.up()
+    assert abs(position(page) / LINK_SECONDS - .6) < .05, position(page)
+    seeked(page)
+    page.locator('#cut-range').focus()
+    before = position(page)
+    page.keyboard.press('ArrowRight')
+    assert abs(position(page) - before - 1 / 30) < 1e-6
+    page.keyboard.press('PageDown')
+    assert abs(position(page) - before + 1 + 1e-9 - 1 / 30) < 1e-6
+    page.screenshot(path=str(artifacts / 'manual-desktop.png'), full_page=True)
+    page.get_by_role('button', name='Descartar vídeo').click()
+    expect(page.locator('#cutter')).to_be_hidden()
+    page.wait_for_function('() => document.querySelectorAll(".job").length === 0')
+    page.locator('#url').fill('https://www.instagram.com/reel/FAILSYNTH/')
+    page.get_by_role('button', name='Carregar vídeo pelo link para escolher o corte').click()
+    expect(page.locator('.job .error')).to_contain_text('Não foi possível obter este link público', timeout=30000)
+    expect(page.locator('#cutter')).to_be_hidden()
+    page.get_by_role('button', name='Excluir agora').click()
+    page.wait_for_function('() => document.querySelectorAll(".job").length === 0')
+    context.close()
+    print(f'BROWSER MANUAL PASS: touch tap/drag + mouse drag + keys/frames/typed time, phone-width player and '
+          f'44 px targets, delayed load feedback, stable player while polling, reload recovery, rejection/network '
+          f'retry, one cut despite repeated clicks, stale poll ignored, cut {chosen:.6f} s → {durations}, '
+          f'preview failure, link replacement, discard, downloader failure')
 
 
 def main():
@@ -177,10 +509,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix='instazap-e2e-') as temporary:
         source = Path(temporary) / 'SYNTHETIC-TEST-61.2s.mp4'
         fixture(source)
+        link = Path(temporary) / f'SYNTHETIC-TEST-link-{LINK_SECONDS}s.mp4'
+        link_fixture(link)
         env = dict(os.environ, INSTAZAP_DATA=str(Path(temporary) / 'data'),
                    INSTAZAP_ACCESS_SECRET='', INSTAZAP_ORIGIN='', INSTAZAP_SECURE_COOKIE='0',
-                   INSTAZAP_BIND='127.0.0.1', INSTAZAP_PORT=str(options.port))
-        proc = subprocess.Popen([sys.executable, 'scripts/serve.py'],
+                   INSTAZAP_BIND='127.0.0.1', INSTAZAP_PORT=str(options.port), INSTAZAP_SYNTHETIC_LINK=str(link))
+        proc = subprocess.Popen([sys.executable, 'scripts/smoke_server.py'],
                                 cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
             with httpx.Client(base_url=BASE, timeout=30) as client:
@@ -221,8 +555,9 @@ def main():
                 assert client.delete(f'/api/jobs/{job_id}').status_code == 204
                 assert client.get(f'/api/jobs/{job_id}').status_code == 404
                 print(f'HTTP PASS: upload → persisted queue → worker → downloads {durations} → delete → 404')
+                manual_http(client, link)
                 if options.browser:
-                    browser_smoke(source)
+                    browser_smoke(source, link)
         finally:
             proc.terminate()
             try:

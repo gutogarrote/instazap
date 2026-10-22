@@ -607,3 +607,37 @@ footer>span {
 .spinner { width:18px; height:18px; flex-shrink:0; border:2px solid var(--border); border-top-color:var(--green); border-radius:50%; animation:spin 1s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 @media(prefers-reduced-motion:reduce) { .spinner { animation:none; } }
+
+/* Mode choice and manual cut. */
+#mode-control { border:0; padding:0; margin:0 0 22px; min-width:0; }
+#mode-control legend { font-size:13px; font-weight:650; margin-bottom:10px; }
+.mode-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.mode-options label { display:flex; gap:10px; align-items:flex-start; margin:0; padding:13px; min-height:44px; border:1px solid var(--border); border-radius:12px; cursor:pointer; background:#fbfcf8; }
+.mode-options label:has(input:checked) { border-color:var(--green); background:#eef5e8; }
+.mode-options input[type=radio] { width:auto; margin:2px 0 0; accent-color:var(--green); }
+.mode-options strong { display:block; font-size:13px; }
+.mode-options small { display:block; font-weight:400; color:var(--muted); font-size:11px; line-height:1.5; margin-top:3px; }
+.cutter { margin-top:22px; padding-top:20px; border-top:1px solid var(--border); scroll-margin-top:8px; }
+.cutter:focus { outline:none; }
+.cutter-head { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.cutter-head .delete { min-height:44px; }
+.cutter-status { display:flex; gap:10px; align-items:center; margin:14px 0; font-size:14px; line-height:1.6; }
+#cutter-video { display:block; width:100%; max-height:70vh; background:#13271f; border-radius:12px; margin-top:6px; }
+.cut-controls { margin-top:14px; }
+.cut-controls>label { margin:0; }
+#cut-range { width:100%; height:44px; margin:4px 0 0; padding:0; border:0; background:transparent; accent-color:var(--green); cursor:pointer; touch-action:none; }
+.cut-time { display:flex; align-items:baseline; gap:6px; margin:2px 0 10px; font-variant-numeric:tabular-nums; }
+#cut-time { font-size:26px; font-weight:750; letter-spacing:-.5px; color:var(--green); }
+#cut-total { font-size:13px; color:var(--muted); }
+.nudges { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+.nudges button { min-height:44px; padding:10px 4px; font-size:13px; background:#edf3e6; color:var(--green); }
+.cut-goto { margin-top:14px; }
+.cut-goto .secondary { min-width:56px; min-height:44px; }
+.cut-plan { font-size:13px; line-height:1.6; background:#f7f8f3; border-radius:10px; padding:12px; margin:14px 0 0; }
+#cut-button { min-height:52px; justify-content:center; font-size:15px; }
+@media(max-width:700px) {
+  .mode-options { grid-template-columns:1fr; }
+  /* Nearly the full phone width: break out of the panel padding, keep controls on screen. */
+  #cutter-video { width:calc(100vw - 12px); max-width:none; margin-left:calc(50% - 50vw + 6px); max-height:58vh; border-radius:8px; }
+  #cut-time { font-size:24px; }
+}

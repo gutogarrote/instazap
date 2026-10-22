@@ -199,7 +199,7 @@ def test_delete_processing_cancels_and_leaves_no_files(site, media, monkeypatch)
     client, app = site
     job_id = client.post('/api/jobs/upload', content=media(1).read_bytes()).json()['id']
     started = threading.Event()
-    def long_split(source, folder, progress, cancel, first_part_seconds):
+    def long_split(source, folder, progress, cancel, first_part_seconds, **kwargs):
         started.set()
         assert cancel.wait(5)
         raise RuntimeError('cancelled')
@@ -219,7 +219,7 @@ def test_graceful_shutdown_requeues_instead_of_failing(site, media, monkeypatch)
     client, app = site
     job_id = client.post('/api/jobs/upload', content=media(1).read_bytes()).json()['id']
     started = threading.Event()
-    def long_split(source, folder, progress, cancel, first_part_seconds):
+    def long_split(source, folder, progress, cancel, first_part_seconds, **kwargs):
         started.set()
         assert cancel.wait(5)
         raise RuntimeError('shutdown')

@@ -4,7 +4,7 @@ import threading
 import time
 import zipfile
 
-from .media import split
+from .media import measure, split
 from .process import run
 
 
@@ -31,19 +31,27 @@ class Worker:
         folder = self.store.files / job['id']
         source = folder / 'source'
         terminal = False
-        stage = 'download' if job['kind'] == 'link' else 'split'
+        # A manual job runs twice: prepare (fetch + measure, then wait for the user), then cut.
+        preparing = job['mode'] == 'manual' and job['cut_start'] is None
+        fetch = job['kind'] == 'link' and (job['mode'] == 'full' or preparing)
+        stage = 'download' if fetch else 'split'
         try:
-            if job['kind'] == 'link':
+            if fetch:
                 # URL is not written to logs or retained after completion.
-                import sys
                 try:
-                    run([sys.executable, '-m', 'instazap.download', job['url'], str(source)], timeout=210,
-                        file_limit=self.store.settings.max_bytes, cancel=self.cancel)
+                    self.fetch(job['url'], source)
                 except Exception as exc:
                     raise ValueError('Não foi possível obter este link público (bloqueio, login ou formato indisponível). Use “Enviar arquivo”.') from exc
+            if preparing:
+                stage = 'measure'
+                duration = measure(source, cancel=self.cancel)
+                # Never split here: the source waits for the user's explicit cut.
+                self.store.update(job['id'], state='awaiting_cut', progress=100, source_duration=duration,
+                                  url=None, expires=self.store.preview_expiry(job['created']))
+                return True
             stage = 'split'
             parts = split(source, folder, lambda i, n: self.store.update(job['id'], progress=10 + int(i / n * 80)), cancel=self.cancel,
-                          first_part_seconds=job['first_part_seconds'])
+                          first_part_seconds=job['first_part_seconds'], cut_start=job['cut_start'])
             stage = 'archive'
             with zipfile.ZipFile(folder / 'partes.zip', 'w', compression=zipfile.ZIP_STORED) as archive:
                 for part in parts:
@@ -72,6 +80,11 @@ class Worker:
             with self.lock:
                 self.active = None
         return True
+
+    def fetch(self, url, source):
+        import sys
+        run([sys.executable, '-m', 'instazap.download', url, str(source)], timeout=210,
+            file_limit=self.store.settings.max_bytes, cancel=self.cancel)
 
     def loop(self):
         while not self.stop.is_set():

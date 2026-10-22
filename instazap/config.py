@@ -8,6 +8,9 @@ class Settings:
     data: Path = Path(os.getenv('INSTAZAP_DATA', './data'))
     max_bytes: int = 200_000_000
     ttl: int = 86400
+    # A preview source lives while its page polls, up to an absolute cap.
+    preview_ttl: int = 3600
+    preview_max: int = 6 * 3600
     max_jobs: int = 8
     disk_budget: int = 3_000_000_000
     access_secret: str = os.getenv('INSTAZAP_ACCESS_SECRET', '')

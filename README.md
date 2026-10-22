@@ -19,6 +19,37 @@ O formulário de link aparece primeiro, seguido do upload manual. O controle com
 
 O restante final é preservado. Finais diferentes de áudio/vídeo são medidos pelos quadros e amostras de apresentação, sem tratar duração inflada de pacote AAC como conteúdo perdido. Quando o áudio continua, o último quadro pode ser prolongado; os tetos de cada parte continuam estritos. A causa e a validação real estão em [docs/validacao.md](docs/validacao.md). O limite de entrada continua 240 s/200 MB; selecionar 30 s não permite entradas maiores. A escolha fica em `jobs.first_part_seconds` no SQLite e acompanha cada tarefa até o worker, inclusive após reinício. Bancos antigos recebem migração aditiva com padrão 60, preservando tarefas e resultados existentes.
 
+## Continuar de onde parei (corte manual)
+
+Para quem já compartilhou o começo de um reel no Status pelo próprio Instagram (o compartilhamento nativo pode parar em qualquer ponto, por volta de 15–30 s). Escolha **“Continuar de onde parei”**, cole o link (ou envie o arquivo) e toque em **Carregar vídeo**. O servidor baixa com o mesmo transporte restrito, mede a duração decodificada e **para**: nada é cortado até você escolher.
+
+O player HTML5 local (controles nativos) ocupa quase toda a largura no celular e é responsivo no desktop. Arraste a barra **Início do corte** (mouse ou toque), use −1 s/−1 quadro/+1 quadro/+1 s, setas/PageUp/PageDown/Home/End ou digite o tempo (`17,4` ou `0:17,4`). O tempo atual fica visível (`0:17,400`) e o botão diz exatamente o que será feito: **Gerar partes a partir de 0:17,400**. Só o trecho do ponto escolhido até o fim vira partes; a introdução já compartilhada não é gerada.
+
+Regra de divisão do restante: o **menor número de partes iguais com no máximo 90 s**. Assim as partes ficam entre 60 e 90 s sempre que possível (restante de 60–90, 120–180 ou 180–270 s). Quando o restante tem menos de 60 s, sai uma parte só; entre 90 e 120 s, duas partes iguais com menos de 60 s são inevitáveis (uma passaria de 90 s). A interface explica isso antes e depois do corte. Nada é descartado e nenhuma parte passa de 90 s.
+
+| Restante após o corte | Partes |
+|---|---|
+| 29,9 s | 29,9 |
+| 75,5 s | 75,5 |
+| 105,4 s | 52,7 + 52,7 (menos de 60 s, inevitável) |
+| 120 s | 60 + 60 |
+| 180 s | 90 + 90 |
+| 180,01 s | 60 + 60 + 60,01 |
+| 240 s | 80 + 80 + 80 |
+
+**Precisão do corte:** o ponto é lido com resolução de 1 µs e arredondado **para baixo** até o quadro de saída de 30 fps (no máximo 1/30 s antes do ponto). O primeiro quadro gerado é o quadro exibido naquele instante; o áudio começa nesse mesmo instante, com precisão de amostra (48 kHz). As fronteiras internas também ficam na grade de 30 fps, então cada parte fica a menos de um quadro do tamanho ideal; a soma é exatamente o restante medido. Os cálculos usam frações exatas, sem `ceil` de ponto flutuante. A medição usa quadros/amostras decodificados (mesma base das correções anteriores de cauda/AAC), preserva offsets originais entre áudio e vídeo e mantém tetos estritos por faixa e contêiner. O MP4 de saída usa timescale de filme 48000 para que a lista de edição não arredonde o áudio para milissegundos nas junções. A posição do player vem do relógio do navegador; para MP4 comuns (início em 0) ela coincide com a linha do tempo medida. Arquivos com início deslocado no contêiner podem diferir por esse deslocamento.
+
+Ciclo de vida: o arquivo de origem fica guardado enquanto a prévia espera a escolha. A expiração é deslizante (1 h, renovada pelo polling da página aberta) com teto absoluto de 6 h desde a criação. Ela sobrevive a reload e reinício do servidor. **Descartar vídeo** apaga na hora. Uma prévia aguardando conta como a tarefa ativa da sessão e reserva espaço como as demais. Ao confirmar o corte, a tarefa volta à fila com o ponto salvo (reinício refaz a partir da origem) e, ao terminar ou falhar, a origem é apagada como antes. Carregar outro link no modo manual (botão **Trocar vídeo**) descarta a prévia atual primeiro. O modo **“Dividir o vídeo inteiro”** continua idêntico e é o padrão.
+
+API do modo manual (mesma sessão, CSRF e proteções):
+
+- `POST /api/jobs/link` com `{"url":"…","mode":"manual"}`; upload com header `X-Mode: manual`. `mode` aceita somente `"full"` (padrão) ou `"manual"`.
+- A tarefa passa por `queued/processing` e chega a `awaiting_cut`, com `source_duration` (duração decodificada) e sem partes. O worker nunca divide nesse estado.
+- `GET /api/jobs/{id}/source`: prévia com Range, somente do dono e somente em `awaiting_cut`.
+- `POST /api/jobs/{id}/cut` com `{"start": 17.4}`: número JSON finito em `[0, source_duration)`. Rejeita (400) NaN, Infinity, booleanos, strings, null, negativos, fim/fora da duração e corpo inválido. A transição é atômica: repetir o mesmo valor devolve 202 sem nova tarefa (retry de rede); outro valor depois do primeiro dá 409; prévia ainda carregando dá 409; outra sessão recebe 404. A resposta inclui o `plan` das partes.
+
+A interface mostra status acessível imediato antes de cada requisição, desabilita ações duplicadas, restaura os controles após rejeição ou falha de rede, ignora respostas de polling iniciadas antes de uma mudança (respostas antigas não ressuscitam uma prévia) e nunca recria o player durante o polling. A posição escolhida fica no `sessionStorage` da aba e volta após reload. Falha do downloader (“Não foi possível obter este link público…”) continua separada de erros de mídia; falha de reprodução da prévia no navegador mostra aviso próprio.
+
 Na API, `POST /api/jobs/link` recebe JSON como `{"url":"https://www.instagram.com/reel/CODIGO/","first_part_seconds":30}`. `POST /api/jobs/upload` continua recebendo **corpo binário bruto**, com header `X-First-Part-Seconds: 30`. Omitir o campo/header usa 60. O JSON aceita somente os inteiros 30 ou 60; o header aceita somente `30` ou `60`. Valores inválidos são rejeitados com 400 antes de criar a tarefa. Sessão, CSRF, origem e demais proteções continuam obrigatórios.
 
 ## Iniciar com Python/uv (Linux)
@@ -124,7 +155,7 @@ uv run python scripts/check_instagram.py 'https://www.instagram.com/reel/CODIGO/
 docker build -t instazap:local .
 ```
 
-Os scripts smoke usam temporários, iniciam por padrão somente `127.0.0.1:8766` (`--port` permite outra porta local) e encerram o servidor ao finalizar. Recusam usar a porta se já ocupada. `artifacts/mobile.png` e `desktop.png` são capturas locais ignoradas pelo Git. Veja [docs/validacao.md](docs/validacao.md) para comandos, resultados e lacunas desta entrega. O workflow CI está configurado para executar pytest, lint, auditoria e build Docker em push/PR. Para verificar o CI, abra a aba Actions do repositório, selecione a execução do commit/branch desejado e confira o status e os logs de cada etapa; checks locais não comprovam execução remota.
+Os scripts smoke usam temporários, iniciam por padrão somente `127.0.0.1:8766` (`--port` permite outra porta local) e encerram o servidor ao finalizar. Recusam usar a porta se já ocupada. O servidor do smoke é `scripts/smoke_server.py`: o mesmo app e limites, mas o downloader de link copia um vídeo **sintético** local. Ele nunca acessa Instagram/X; prova o processamento local, não downloads reais. Não use esse script para servir usuários. `artifacts/mobile.png`, `desktop.png`, `manual-mobile.png`, `manual-mobile-cutter.png` e `manual-desktop.png` são capturas locais ignoradas pelo Git. Veja [docs/validacao.md](docs/validacao.md) para comandos, resultados e lacunas desta entrega. O workflow CI está configurado para executar pytest, lint, auditoria e build Docker em push/PR. Para verificar o CI, abra a aba Actions do repositório, selecione a execução do commit/branch desejado e confira o status e os logs de cada etapa; checks locais não comprovam execução remota.
 
 ## Mapa dos arquivos
 
@@ -137,7 +168,7 @@ Os scripts smoke usam temporários, iniciam por padrão somente `127.0.0.1:8766`
 | `instazap/network.py`, `download.py` | yt-dlp, transporte com proteção SSRF |
 | `instazap/process.py` | Subprocessos com limites/cancelamento |
 | `instazap/static/` | Interface responsiva em português, sem build |
-| `scripts/` | Inicialização e verificações HTTP/navegador/link |
+| `scripts/` | Inicialização e verificações HTTP/navegador/link (`smoke_server.py` só para testes) |
 | `tests/` | Testes offline com ffmpeg real |
 | `pyproject.toml`, `uv.lock`, `requirements.txt` | Dependências e versões travadas |
 | `Dockerfile`, `compose.yaml`, `.env.example` | Execução de um único host |
@@ -145,6 +176,6 @@ Os scripts smoke usam temporários, iniciam por padrão somente `127.0.0.1:8766`
 
 ## Limitações e próximos passos
 
-Acesso por link é de melhor esforço e depende da rede e da plataforma. X não teve validação real. Não há publicação automática, contas, edição, seleção de carrossel, sincronização entre navegadores ou vários servidores. Metadados de duração inconsistentes, vídeos danificados e formatos incomuns podem ser recusados em vez de gerar uma saída incompleta. A normalização para 30 fps pode repetir/descartar quadros para ajustar cadência; limites de áudio usam a duração de apresentação MP4/AAC com priming/padding sinalizados no container. Não há promessa de reprodução idêntica bit a bit. Android/iPhone e o upload final no aplicativo WhatsApp precisam de validação em aparelhos reais.
+Acesso por link é de melhor esforço e depende da rede e da plataforma. X não teve validação real. O modo manual foi validado só com mídia sintética e downloader substituído nos testes; nenhum link real de Instagram foi baixado nesta entrega. A prévia reproduz o arquivo de origem como veio: codecs que o navegador não toca (ex.: HEVC em alguns navegadores) mostram aviso, mas ainda permitem digitar o tempo. Não há publicação automática, contas, edição, seleção de carrossel, sincronização entre navegadores ou vários servidores. Metadados de duração inconsistentes, vídeos danificados e formatos incomuns podem ser recusados em vez de gerar uma saída incompleta. A normalização para 30 fps pode repetir/descartar quadros para ajustar cadência; limites de áudio usam a duração de apresentação MP4/AAC com priming/padding sinalizados no container. Não há promessa de reprodução idêntica bit a bit. Android/iPhone e o upload final no aplicativo WhatsApp precisam de validação em aparelhos reais.
 
 Cloudflare (proxy/acesso, armazenamento ou processamento externo) e Vercel (frontend com worker externo) são opções futuras; **nenhum deles, nem R2, é necessário agora**. Separar serviço/fila/storage só se o uso justificar. O [relatório original](docs/planejamento-original.md) fica preservado como contexto; [as decisões implementadas](docs/decisoes.md) o substituem para esta versão.
