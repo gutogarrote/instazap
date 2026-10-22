@@ -43,7 +43,8 @@ class Worker:
                     raise ValueError('Não foi possível obter este link público (bloqueio, login ou formato indisponível). Use “Enviar arquivo”.') from exc
             stage = 'split'
             parts = split(source, folder, lambda i, n: self.store.update(job['id'], progress=10 + int(i / n * 80)), cancel=self.cancel,
-                          first_part_seconds=job['first_part_seconds'])
+                          first_part_seconds=job['first_part_seconds'],
+                          measured_callback=lambda duration: self.store.update(job['id'], original_duration=duration))
             stage = 'archive'
             with zipfile.ZipFile(folder / 'partes.zip', 'w', compression=zipfile.ZIP_STORED) as archive:
                 for part in parts:

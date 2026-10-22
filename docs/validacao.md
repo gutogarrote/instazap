@@ -1,4 +1,43 @@
-# Validação: cortes de mídia real do Instagram — 21/10/2026
+# Validação: tarefa A, durações equilibradas — 22/10/2026
+
+Worktree `duracoes-equilibradas`, base `origin/main` **608288c**. Somente tarefa A; sem timeline manual, subagentes, push, PR, merge, deploy ou alterações globais. Porta 8765/dados do servidor ativo e outros worktrees preservados. Linux, Python 3.14.5, ffmpeg/ffprobe 6.1.1, um thread de processamento e testes sequenciais. Servidores descartáveis somente em **127.0.0.1:8871**, encerrados pelo script; fontes/probes em TMPDIR. Chromium instalado em cache reutilizado, sem instalar navegador.
+
+## Comandos e resultados desta entrega
+
+| Comando exato | Resultado |
+|---|---|
+| `uv sync --frozen` | Sucesso, lock existente; 48 pacotes instalados |
+| `uv run pytest -q` | **191 passed, 1 warning in 287.66s** |
+| `uv run ruff check instazap tests scripts` | **All checks passed!** |
+| `uv run python scripts/smoke.py --port 8871` | **HTTP PASS**, downloads [60.0, 1.2], exclusão/404; **SERVER STOPPED** |
+| `uv run --group browser python scripts/smoke.py --browser --port 8871` | **HTTP PASS + BROWSER PASS; SERVER STOPPED** |
+| `uv run pytest -q tests/test_media_timeline.py -k 'fractional_equal or original_audio_delay'` | **2 passed, 13 deselected, 1 warning in 16.14s**, antes da suíte completa |
+
+O único warning é a depreciação já existente de httpx no TestClient do Starlette. `scripts/smoke.py --help` foi inspecionado antes da execução. O grupo browser instalou somente suas três dependências Python; o Chromium já existia.
+
+## Cobertura e correção de junções fracionárias
+
+Primeira parte 15/30/60/90 (padrão 60) aceita em upload/link; valores inválidos/tipos/coerções são recusados antes da criação. Store e CHECK SQLite validam a escolha. Migração aditiva é testada tanto sem coluna antiga quanto com o CHECK anterior (30,60); bytes de uma saída pronta anterior permanecem intactos. Fila com as quatro escolhas, novas instâncias de Store/app, interrupção/reinício, ZIP/Range/ownership e limites de recursos continuam cobertos.
+
+Partes posteriores usam o menor número de intervalos iguais de até 90 s. Testes racionais incluem restante zero, frações próximas a zero, 60, 90, 120 e 180, vizinhanças desses limites e 225 s. Testes com ffmpeg incluem restos 59,9; 60; 90; 90,1; 119,9; 120; 180 e 190,1 s, primeira seleção maior que o total, múltiplos exatos e rejeição de 240,1 s. Conferem todas as faixas/contêineres sob os tetos estritos e decodificação independente das saídas.
+
+Uma regressão nova encontrou perda real de aproximadamente 14–15 amostras de áudio por junção fracionária: o timescale padrão do MP4 arredondava a lista de edição para milissegundos. A saída agora usa `-movie_timescale 48000`, mantendo precisão de amostra. A verificação usa chirp a 48 kHz, comparando PCM nas três junções e na cauda, além de marcadores visuais próximos a cada corte, com origem a 30000/1001 fps. No corte fracionário o quadro que atravessa a fronteira pode aparecer de um dos lados; o teste exige que sobreviva junto à junção. Outro teste compara conteúdo com áudio atrasado em 250 ms, preservando o offset original. Casos sem áudio, finais desiguais A/V, AAC com duração inflada, VFR/offset e marcador final permanecem. A soma das durações sozinha não é usada como prova de conteúdo.
+
+O teste de link substitui **somente o downloader por fixture sintética** e bloqueia a primeira codificação real: nesse intervalo a API já retorna `original_duration`, estado processing e nenhuma parte pronta. O valor persiste no resultado/recuperação. Downloader que falha oferece upload; arquivo baixado inválido produz erro de processamento distinto. A duração vem do probe local reutilizado, depois do download e antes de codificar; nenhuma requisição remota adicional ou duração presumida de URL.
+
+## Aceitação real no navegador
+
+Chromium em 390×844 e 1440×1000 verifica as quatro escolhas nos dois formulários. POST retido artificialmente confirma status acessível imediatamente, foco visível, controles desabilitados e bloqueio de duplicatas antes da resposta HTTP; rejeições HTTP/conexão restauram os controles. Estados de link e duração desconhecida/medida/recuperada são simulados explicitamente na camada HTTP, sem alegar extração real.
+
+A matriz da UI verifica explicações nos limites viáveis/inviáveis e total menor que cada escolha. Uploads HTTP reais são processados pelo worker para as quatro escolhas com fonte sintética de 61,2 s; 90 produz somente 61,2 s. Outro upload real de 150,1 s com primeira 30 produz duas partes restantes de aproximadamente 60,05 s, dentro do arredondamento de quadro. Downloads são inspecionados com ffprobe. Polling de outro job preserva o nó do player carregado e a rolagem; reload, sessão recuperada e exclusão passam sem erro JavaScript/overflow. Capturas em `artifacts/mobile.png` e `artifacts/desktop.png` são locais, ignoradas pelo Git e foram inspecionadas visualmente. O destaque decorativo desktop foi atualizado para o teto de 90 s; o smoke de navegador foi repetido com sucesso após esse ajuste final de CSS.
+
+## Limites da evidência
+
+**Nenhum link real de Instagram/X foi baixado ou validado nesta entrega.** Fixtures sintéticas mais ffmpeg/Chromium reais comprovam somente processamento e interface. Os registros abaixo são de versões anteriores, com evidência e regras daquelas versões; não são novas execuções nem prova de acesso remoto para esta mudança. WhatsApp em Android/iPhone, CI remoto e Docker não foram executados. Resultados antigos sem fonte disponível mantêm duração original desconhecida; os arquivos prontos são preservados. Recodificação continua com perdas e quantização de quadro/amostra, sem promessa de identidade bit a bit.
+
+---
+
+# Registro histórico: cortes de mídia real do Instagram — 21/10/2026
 
 Worktree `cortes-instagram`, branch `fix/cortes-instagram`, base publicada `fac4bdb`. UI, persistência e primeira parte de 30/60 s aprovadas foram preservadas. Sem push, PR, merge ou deploy; preview 8765 preservado. Smoke somente em `127.0.0.1:8766`, encerrado pelo script. Linux, Python 3.14.5, ffmpeg/ffprobe 6.1.1; subprocessos de mídia com um thread de decodificação/filtros/encoder e os limites existentes, sem mudanças globais.
 

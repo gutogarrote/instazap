@@ -40,6 +40,17 @@ function render(jobs) {
     remove.addEventListener('click', async () => { remove.disabled = true; try { await api(`/api/jobs/${job.id}`, {method:'DELETE'}); await refresh(); } catch (e) { error(e.message); remove.disabled = false; } });
     head.append(remove); card.append(head);
     const status = node('p', job.error || `${states[job.state]}${job.state === 'processing' ? ` · ${job.progress}%` : ''}`, job.error ? 'error' : 'job-status'); status.setAttribute('role', 'status'); card.append(status);
+    card.append(node('p', `Primeira parte: ${job.first_part_seconds || 60} s`, 'hint'));
+    if (job.original_duration != null) {
+      const duration = node('p', `Duração original: ${job.original_duration.toFixed(2)} s`, 'original-duration');
+      duration.setAttribute('role', 'status'); card.append(duration);
+      const remainder = Math.max(0, job.original_duration - job.first_part_seconds);
+      if (remainder > 0 && (remainder < 60 || (remainder > 90 && remainder < 120))) {
+        card.append(node('p', 'Para preservar tudo sem ultrapassar 90 s, o restante fica em partes iguais menores que 60 s.', 'hint'));
+      }
+    } else if (['queued', 'processing'].includes(job.state)) {
+      card.append(node('p', 'A duração original aparecerá após obter e medir o vídeo.', 'hint'));
+    }
     if (['queued', 'processing'].includes(job.state)) { const progress = node('progress'); progress.max = 100; progress.value = job.progress; progress.setAttribute('aria-label', 'Progresso do processamento'); card.append(progress); }
     if (job.state === 'ready') {
       const parts = node('div', '', 'parts');

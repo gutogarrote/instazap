@@ -129,8 +129,8 @@ def create_app(settings=None):
     @app.post('/api/jobs/upload', status_code=202)
     async def upload(request: Request):
         raw = request.headers.get('x-first-part-seconds', '60')
-        if raw not in ('30', '60'):
-            raise HTTPException(400, 'A primeira parte deve ter 30 ou 60 segundos.')
+        if raw not in ('15', '30', '60', '90'):
+            raise HTTPException(400, 'A primeira parte deve ter 15, 30, 60 ou 90 segundos.')
         try:
             job_id = store.create(owner(request), 'upload', first_part_seconds=int(raw))
         except Busy as exc:

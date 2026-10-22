@@ -52,11 +52,11 @@ def presentation_timeline(path: Path, cancel=None):
     data = json.loads(run(['ffprobe', '-v', 'error', '-threads', '1',
                           '-protocol_whitelist', 'file', '-format_whitelist', INPUT_FORMATS,
                           '-show_frames', '-show_streams', '-show_format', '-show_entries',
-                          'format=start_time:stream=index,codec_type,sample_rate:'
-                          'frame=stream_index,best_effort_timestamp_time,duration_time,nb_samples',
+                          'format=start_time:stream=index,codec_type,sample_rate,time_base:'
+                          'frame=stream_index,best_effort_timestamp,best_effort_timestamp_time,duration,duration_time,nb_samples',
                           '-of', 'json', path], cancel=cancel))
     streams = {s['index']: s for s in data['streams']}
-    origin = float(data['format'].get('start_time', 0))
+    origin = Fraction(data['format'].get('start_time', '0'))
     ends = {}
     for frame in data['frames']:
         stream = streams[frame['stream_index']]
@@ -65,17 +65,22 @@ def presentation_timeline(path: Path, cancel=None):
         timestamp = frame.get('best_effort_timestamp_time')
         if timestamp is None:
             raise MediaError('Não foi possível medir os quadros deste vídeo.')
-        length = (int(frame['nb_samples']) / int(stream['sample_rate'])
-                  if stream['codec_type'] == 'audio' else float(frame.get('duration_time', 0)))
+        time_base = Fraction(stream.get('time_base', '1/1000000'))
+        timestamp = (int(frame['best_effort_timestamp']) * time_base
+                     if 'best_effort_timestamp' in frame else Fraction(timestamp))
+        frame_duration = (int(frame['duration']) * time_base if 'duration' in frame
+                          else Fraction(frame.get('duration_time', '0')))
+        length = (Fraction(int(frame['nb_samples']), int(stream['sample_rate']))
+                  if stream['codec_type'] == 'audio' else frame_duration)
         # A shorter presentation duration signals encoder end padding. A longer
         # one cannot manufacture samples absent from the decoded frame.
         if stream['codec_type'] == 'audio' and frame.get('duration_time'):
-            length = min(length, float(frame['duration_time']))
+            length = min(length, frame_duration)
         kind = stream['codec_type']
-        ends[kind] = max(ends.get(kind, 0), float(timestamp) - origin + length)
+        ends[kind] = max(ends.get(kind, 0), timestamp - origin + length)
     if not ends or not 0 < max(ends.values()) <= 240:
         raise MediaError('Não foi possível medir o conteúdo dentro do limite de 240 segundos.')
-    return ends
+    return {kind: float(end) for kind, end in ends.items()}
 
 
 def presentation_duration(path: Path):
@@ -83,12 +88,25 @@ def presentation_duration(path: Path):
 
 
 def validate_first_part(value):
-    if type(value) is not int or value not in (30, 60):
-        raise ValueError('A primeira parte deve ter 30 ou 60 segundos.')
+    if type(value) is not int or value not in (15, 30, 60, 90):
+        raise ValueError('A primeira parte deve ter 15, 30, 60 ou 90 segundos.')
     return value
 
 
-def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None, first_part_seconds=60):
+def partition(duration, first_part_seconds=60):
+    """Rational cut points avoid floating ceil manufacturing an empty last part."""
+    validate_first_part(first_part_seconds)
+    total = Fraction(str(duration))
+    if not 0 < total <= 240:
+        raise MediaError('Duração fora do limite de 240 segundos.')
+    first = min(total, first_part_seconds)
+    remainder = total - first
+    count = (remainder.numerator + 90 * remainder.denominator - 1) // (90 * remainder.denominator)
+    return [first] + ([remainder / count] * count if count else [])
+
+
+def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None, first_part_seconds=60,
+          measured_callback=lambda _: None):
     validate_first_part(first_part_seconds)
     duration, width, height, audio = probe(source)
     timeline = presentation_timeline(source, cancel=cancel)
@@ -96,17 +114,21 @@ def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None, 
     # Container durations remain subject to the input limit; splitting uses samples/frames.
     logger.info('media stage=measure declared=%.6f presentation=%.6f', duration, measured)
     duration = measured
-    count = 1 + math.ceil(max(0, duration - first_part_seconds) / 60)
+    measured_callback(duration)
+    spans = partition(duration, first_part_seconds)
+    count = len(spans)
     offset = 0
     parts = []
     for index in range(count):
         progress(index, count)
         name = f'video-parte-{index + 1:02}-de-{count:02}.mp4'
         target = directory / name
-        ceiling = first_part_seconds if index == 0 else 60
-        span = min(ceiling, duration - offset)
+        ceiling = first_part_seconds if index == 0 else 90
+        span = float(spans[index])
         # Trim after filtering: input seeking can discard the frame straddling
         # a cut at 29.97 fps/VFR and restart the fps conversion with a new phase.
+        # MP4 edit lists use audio sample precision: milliseconds discard
+        # samples at fractional joins even when the encoded AAC retains them.
         args = ['ffmpeg', '-nostdin', '-v', 'error', '-y', '-threads', '1',
                 '-filter_threads', '1', '-protocol_whitelist', 'file', '-format_whitelist', INPUT_FORMATS,
                 '-i', str(source), '-ss', str(offset), '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn',
@@ -117,7 +139,7 @@ def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None, 
                 '-af', 'aresample=48000:async=1:first_pts=0',
                 '-c:a', 'aac', '-b:a', '128k', '-ar', '48000',
                 '-map_metadata', '-1', '-metadata:s:v', 'rotate=0',
-                '-movflags', '+faststart', str(target)]
+                '-movie_timescale', '48000', '-movflags', '+faststart', str(target)]
         try:
             run(args, cancel=cancel)
         except Exception:
@@ -140,6 +162,6 @@ def split(source: Path, directory: Path, progress=lambda *_: None, cancel=None, 
             logger.warning('media stage=validate part=%d actual=%.6f expected=%.6f ceiling=%d',
                            index + 1, actual, span, ceiling)
             raise MediaError('Não foi possível preservar o final dentro do limite desta parte. Tente outro arquivo.')
-        offset += span
+        offset = float(sum(spans[:index + 1]))
         parts.append({'name': name, 'duration': actual, 'bytes': target.stat().st_size, 'audio': audio})
     return parts

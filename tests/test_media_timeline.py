@@ -155,3 +155,63 @@ def test_ntsc_frame_straddling_join_survives(tmp_path, first):
                      '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-threads', '1', '-')
     assert sum(pixels[::3]) / len(pixels[::3]) > 200
     assert sum(pixels[2::3]) / len(pixels[2::3]) < 40
+
+
+def test_fractional_equal_joins_preserve_chirp_and_frames(tmp_path):
+    from instazap.media import partition
+    source = fixture(tmp_path, 205.1, 205.092, rate='30000/1001')
+    measured = presentation_duration(source)
+    spans = partition(measured, 15)
+    cuts = [float(sum(spans[:i])) for i in range(1, len(spans))]
+    # Mark frames straddling ALL cuts, including the fractional equal cuts.
+    marked = tmp_path / 'marked.mp4'
+    markers = [math.floor(cut * 30000 / 1001) for cut in cuts]
+    vf = ','.join(f"drawbox=color=red:t=fill:enable='eq(n,{n})'" for n in markers)
+    command('-i', source, '-vf', vf, '-c:v', 'libx264', '-threads', '1',
+            '-preset', 'ultrafast', '-c:a', 'copy', marked)
+    original = pcm(marked)
+    parts = split(marked, tmp_path, first_part_seconds=15)
+    assert len(parts) == 4
+    joined = array.array('h')
+    for part in parts:
+        joined.extend(pcm(tmp_path / part['name']))
+    # Chirp correlation at each cut and the final samples detects omitted/repeated content.
+    for cut in cuts + [len(original)/48000 - .05]:
+        start = round(cut * 48000)
+        a, b = original[start:start+1920], joined[start:start+1920]
+        assert len(a) == len(b) == 1920
+        correlation = sum(x*y for x, y in zip(a, b, strict=True)) / math.sqrt(
+            sum(x*x for x in a) * sum(y*y for y in b))
+        assert correlation > .95
+    for previous, following in zip(parts, parts[1:], strict=False):
+        # Fractional cuts fall between output frames. The straddling source
+        # frame may land on either side, but must survive near each join.
+        pixels = command('-sseof', '-0.07', '-i', tmp_path / previous['name'], '-frames:v', '2',
+                         '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-threads', '1', '-')
+        pixels += command('-i', tmp_path / following['name'], '-frames:v', '2',
+                          '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-threads', '1', '-')
+        frame_bytes = 64 * 48 * 3
+        assert any(sum(pixels[i:i+frame_bytes:3]) / (frame_bytes/3) > 180
+                   for i in range(0, len(pixels), frame_bytes))
+
+
+def test_original_audio_delay_survives_equal_splits(tmp_path):
+    source = tmp_path / 'delayed-audio.mp4'
+    command('-f', 'lavfi', '-i', 'color=blue:s=64x48:r=30:d=150.1',
+            '-itsoffset', '0.25', '-f', 'lavfi', '-i',
+            'aevalsrc=0.3*sin(2*PI*(300*t+3*t*t)):s=48000:d=149.85',
+            '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-c:a', 'aac', source)
+    normalized = tmp_path / 'original.pcm'
+    command('-i', source, '-vn', '-af', 'aresample=48000:async=1:first_pts=0',
+            '-ac', '1', '-f', 's16le', normalized)
+    original = array.array('h', normalized.read_bytes())
+    parts = split(source, tmp_path, first_part_seconds=30)
+    joined = array.array('h')
+    for part in parts:
+        joined.extend(pcm(tmp_path / part['name']))
+    assert max(abs(v) for v in joined[:int(.20*48000)]) < 50
+    for start in [int(.3*48000), 30*48000, 90*48000, 149*48000]:
+        a, b = original[start:start+1920], joined[start:start+1920]
+        correlation = sum(x*y for x, y in zip(a, b, strict=True)) / math.sqrt(
+            sum(x*x for x in a) * sum(y*y for y in b))
+        assert correlation > .95

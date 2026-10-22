@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import socket
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,11 +19,11 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'http://127.0.0.1:8766'
 
 
-def fixture(path):
+def fixture(path, duration=61.2):
     subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
-                    'testsrc2=s=96x64:r=10:d=61.2', '-f', 'lavfi', '-i',
-                    'sine=frequency=880:duration=61.2', '-threads', '1', '-c:v', 'libx264',
-                    '-preset', 'ultrafast', '-c:a', 'aac', '-t', '61.2', str(path)], check=True)
+                    f'testsrc2=s=96x64:r=10:d={duration}', '-f', 'lavfi', '-i',
+                    f'sine=frequency=880:duration={duration}', '-threads', '1', '-c:v', 'libx264',
+                    '-preset', 'ultrafast', '-c:a', 'aac', '-t', str(duration), str(path)], check=True)
 
 
 def browser_smoke(source):
@@ -32,7 +33,7 @@ def browser_smoke(source):
     with sync_playwright() as p:
         # Reuse an existing browser when available; no heavyweight browser install in this script.
         existing = sorted((Path.home() / '.cache/ms-playwright').glob('chromium-*/chrome-linux*/chrome'))
-        executable = os.getenv('INSTAZAP_TEST_CHROME') or (str(existing[-1]) if existing else None)
+        executable = os.getenv('INSTAZAP_TEST_CHROME') or (str(existing[-1]) if existing else shutil.which('chromium') or shutil.which('chromium-browser'))
         browser = p.chromium.launch(executable_path=executable, headless=True, args=['--disable-dev-shm-usage'])
         errors = []
         from playwright.sync_api import expect
@@ -52,7 +53,7 @@ def browser_smoke(source):
             assert page.locator('.results').bounding_box()['y'] < page.locator('.how').bounding_box()['y']
             # Hold each POST: assert visible busy feedback while NO response exists.
             for kind in ['link', 'upload']:
-                for first in [30, 60]:
+                for first in [15, 30, 60, 90]:
                     page.locator(f'input[name="first-part"][value="{first}"]').check()
                     held = []
                     pattern = f'**/api/jobs/{kind}'
@@ -101,15 +102,34 @@ def browser_smoke(source):
 
         # Successful link submission with explicit synthetic queue/worker states.
         fake = {'id':'synthetic', 'created':time.time(), 'expires':time.time()+3600,
-                'state':'queued', 'progress':0, 'error':None, 'parts':[]}
+                'first_part_seconds':90, 'original_duration':None, 'state':'queued', 'progress':0, 'error':None, 'parts':[]}
         page.route('**/api/jobs', lambda route: route.fulfill(json=[fake]))
         page.route('**/api/jobs/link', lambda route: route.fulfill(status=202, json={'id':'synthetic'}))
         page.get_by_role('button', name='Preparar vídeo pelo link').click()
         expect(page.locator('.job-status')).to_have_text('Na fila')
-        fake.update(state='processing', progress=25)
+        expect(page.get_by_text('A duração original aparecerá após obter e medir o vídeo.')).to_be_visible()
+        fake.update(state='processing', progress=25, original_duration=61.2)
         expect(page.locator('.job-status')).to_have_text('Preparando as partes · 25%', timeout=10000)
+        expect(page.locator('.original-duration')).to_have_text('Duração original: 61.20 s')
+        page.reload()
+        expect(page.locator('.original-duration')).to_have_text('Duração original: 61.20 s')
         fake.update(state='error', error='Link de teste indisponível. Envie o arquivo.')
         expect(page.locator('.job .error')).to_contain_text('Envie o arquivo', timeout=10000)
+        # UI boundaries: short selections and feasible/infeasible equal remainders.
+        fake.update(state='ready', error=None)
+        for first in [15, 30, 60, 90]:
+            for remainder in [0, 1.2, 59.9, 60, 90, 90.1, 119.9, 120, 180, 180.1, 225]:
+                if first + remainder > 240:
+                    continue
+                fake.update(first_part_seconds=first, original_duration=first+remainder if remainder else first/2)
+                page.reload()
+                expect(page.locator('.original-duration')).to_have_text(f'Duração original: {fake["original_duration"]:.2f} s')
+                expect(page.get_by_text(f'Primeira parte: {first} s', exact=True)).to_be_visible()
+                explanation = page.get_by_text('Para preservar tudo sem ultrapassar 90 s, o restante fica em partes iguais menores que 60 s.')
+                if 0 < remainder < 60 or 90 < remainder < 120:
+                    expect(explanation).to_be_visible()
+                else:
+                    expect(explanation).to_have_count(0)
         page.unroute('**/api/jobs')
         page.unroute('**/api/jobs/link')
         context.close()
@@ -122,6 +142,8 @@ def browser_smoke(source):
         page.locator('#video-file').set_input_files(str(source))
         page.get_by_role('button', name='Dividir meu vídeo').click()
         page.get_by_text('Pronto para o Status', exact=True).wait_for(timeout=120000)
+        expect(page.locator('.original-duration')).to_have_text('Duração original: 61.20 s')
+        expect(page.get_by_text('Para preservar tudo sem ultrapassar 90 s, o restante fica em partes iguais menores que 60 s.')).to_be_visible()
         assert page.locator('.part').count() == 2
         assert page.locator('.part p').all_text_contents() == ['Parte 1 de 2 · 30.0 s', 'Parte 2 de 2 · 31.2 s']
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -159,9 +181,33 @@ def browser_smoke(source):
         page.screenshot(path=str(artifacts / 'desktop.png'), full_page=True)
         page.get_by_role('button', name='Excluir agora').click()
         page.wait_for_function('() => document.querySelectorAll(".job").length === 0')
+        # Real upload/worker/result for every other choice, including selection > source.
+        for first, wanted in [(15, [15, 46.2]), (60, [60, 1.2]), (90, [61.2])]:
+            page.locator(f'input[name="first-part"][value="{first}"]').check()
+            page.locator('#video-file').set_input_files(str(source))
+            page.get_by_role('button', name='Dividir meu vídeo').click()
+            page.get_by_text('Pronto para o Status', exact=True).wait_for(timeout=120000)
+            actual = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')[0]
+            assert actual['first_part_seconds'] == first
+            assert [part['duration'] for part in actual['parts']] == wanted
+            expect(page.locator('.original-duration')).to_have_text('Duração original: 61.20 s')
+            page.get_by_role('button', name='Excluir agora').click()
+            expect(page.locator('.job')).to_have_count(0)
+        balanced = source.parent / 'SYNTHETIC-TEST-150.1s.mp4'
+        fixture(balanced, 150.1)
+        page.locator('input[name="first-part"][value="30"]').check()
+        page.locator('#video-file').set_input_files(str(balanced))
+        page.get_by_role('button', name='Dividir meu vídeo').click()
+        page.get_by_text('Pronto para o Status', exact=True).wait_for(timeout=120000)
+        actual = page.evaluate('() => fetch("/api/jobs").then(r => r.json())')[0]
+        assert len(actual['parts']) == 3
+        assert all(abs(part['duration'] - 60.05) <= 1/30+.001 for part in actual['parts'][1:])
+        expect(page.get_by_text('Para preservar tudo sem ultrapassar 90 s, o restante fica em partes iguais menores que 60 s.')).to_have_count(0)
+        page.get_by_role('button', name='Excluir agora').click()
+        expect(page.locator('.job')).to_have_count(0)
         assert errors == [], errors
         browser.close()
-    print('BROWSER PASS: mobile/desktop order, delayed link/upload busy feedback, duplicate guard, 30/60 transmission, rejection recovery, synthetic link stages, real 30-first upload/downloads, stable previews, reload/delete')
+    print('BROWSER PASS: mobile/desktop order, delayed link/upload busy feedback, duplicate guard, 15/30/60/90 transmission, rejection recovery, synthetic link duration before completion/recovery/stages, real uploads for all four choices and fractional equal remainder/downloads, stable previews, reload/delete')
 
 
 def main():

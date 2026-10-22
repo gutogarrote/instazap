@@ -13,23 +13,29 @@ def info(path):
 
 
 @pytest.mark.parametrize('first,duration,expected', [
-    (60, 120, [60, 60]), (60, 240, [60]*4), (60, 60, [60]),
+    (60, 120, [60, 60]), (60, 240, [60, 90, 90]), (60, 60, [60]),
     (60, 61.2, [60, 1.2]), (60, 119.9, [60, 59.9]),
-    (30, 120, [30, 60, 30]), (30, 240, [30, 60, 60, 60, 30]),
-    (30, 30, [30]), (30, 60, [30, 30]), (30, 91.2, [30, 60, 1.2]),
+    (30, 120, [30, 90]), (30, 240, [30, 70, 70, 70]),
+    (30, 30, [30]), (30, 60, [30, 30]), (30, 91.2, [30, 61.2]),
     (30, 29.9, [29.9]), (30, 90, [30, 60]),
+    (15, 14.9, [14.9]), (90, 20, [20]), (90, 90, [90]),
+    (15, 74.9, [15, 59.9]), (15, 75, [15, 60]),
+    (15, 105, [15, 90]), (15, 105.1, [15, 45.05, 45.05]),
+    (15, 134.9, [15, 59.95, 59.95]), (15, 135, [15, 60, 60]),
+    (15, 195, [15, 90, 90]), (15, 205.1, [15, 190.1/3, 190.1/3, 190.1/3]),
+    (90, 240, [90, 75, 75]),
 ])
 def test_real_splits_and_tail(media, tmp_path, first, duration, expected):
     source = media(duration)
     parts = split(source, tmp_path, first_part_seconds=first)
     assert len(parts) == len(expected)
     for index, (part, wanted) in enumerate(zip(parts, expected, strict=True)):
-        ceiling = first if index == 0 else 60
+        ceiling = first if index == 0 else 90
         target = tmp_path / part['name']
         result = info(target)
         actual = float(result['format']['duration'])
         assert 0 < actual <= ceiling
-        assert actual == pytest.approx(wanted, abs=.025)
+        assert actual == pytest.approx(wanted, abs=.034)
         v, a = result['streams']
         assert v['codec_name'] == 'h264' and v['pix_fmt'] == 'yuv420p'
         assert a['codec_name'] == 'aac'
@@ -55,7 +61,7 @@ def test_real_splits_and_tail(media, tmp_path, first, duration, expected):
     assert max(abs(v) for v in samples) > 1000
 
 
-@pytest.mark.parametrize('first', [30, 60])
+@pytest.mark.parametrize('first', [15, 30, 60, 90])
 def test_overlimit_is_rejected_without_output(media, tmp_path, first):
     with pytest.raises(MediaError, match='240'):
         split(media(240.1), tmp_path, first_part_seconds=first)
@@ -94,7 +100,31 @@ def test_local_playlist_cannot_read_other_files(media, tmp_path):
         probe(source)
 
 
-@pytest.mark.parametrize('value', [0, -30, 30.5, 30.0, '30', None, True, 90])
+@pytest.mark.parametrize('value', [0, -30, 30.5, 30.0, '30', None, True, 45])
 def test_split_rejects_invalid_first_part(tmp_path, value):
-    with pytest.raises(ValueError, match='30 ou 60'):
+    with pytest.raises(ValueError, match='15, 30, 60 ou 90'):
         split(tmp_path / 'missing', tmp_path, first_part_seconds=value)
+
+
+@pytest.mark.parametrize('remainder,count', [(0, 0), (.000001, 1), (59.999999, 1), (60, 1),
+    (90, 1), (90.000001, 2), (119.999999, 2), (120, 2), (180, 2), (180.000001, 3), (225, 3)])
+def test_partition_rational_boundaries(remainder, count):
+    from fractions import Fraction
+    from instazap.media import partition
+    total = Fraction(15) + Fraction(str(remainder))
+    spans = partition(total, 15)
+    assert len(spans) == 1 + count
+    assert sum(spans) == total
+    assert all(0 < span <= 90 for span in spans)
+    if count:
+        assert len(set(spans[1:])) == 1
+        assert count == 1 or remainder > (count - 1) * 90
+        if remainder >= 60 and not 90 < remainder < 120:
+            assert all(60 <= span <= 90 for span in spans[1:])
+
+
+def test_equal_remainder_without_audio(media, tmp_path):
+    parts = split(media(150.1, audio=False), tmp_path, first_part_seconds=30)
+    assert len(parts) == 3
+    assert all(not part['audio'] for part in parts)
+    assert parts[1]['duration'] == pytest.approx(parts[2]['duration'], abs=1/30+.001)

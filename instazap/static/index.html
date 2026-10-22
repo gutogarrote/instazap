@@ -2,19 +2,19 @@
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#101b18"><meta name="description" content="Seu vídeo, em partes de 60 segundos. Prepare vídeos para o Status com privacidade.">
+<meta name="theme-color" content="#101b18"><meta name="description" content="Seu vídeo, em partes equilibradas. Prepare vídeos para o Status com privacidade.">
 <title>Instazap — do vídeo ao Status</title>
 <link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script>
 </head>
 <body>
 <header class="top"><a class="brand" href="/" aria-label="Instazap início"><span class="brand-icon">i<span>z</span></span>instazap<span class="badge">pessoal</span></a><span class="private"><span class="dot"></span> Seu espaço privado</span></header>
 <main>
-<section class="intro"><p class="eyebrow">MENOS CORTES. MAIS HISTÓRIAS.</p><h1>Do seu vídeo<br>ao <span>Status.</span></h1><p class="lead">Primeira parte de 30 ou 60 segundos.<br>Na ordem certa, com o vídeo inteiro.</p><div class="facts"><span>↗ Até 4 minutos</span><span>◉ Até 200 MB</span><span>⌁ Sem recortar a imagem</span></div></section>
+<section class="intro"><p class="eyebrow">MENOS CORTES. MAIS HISTÓRIAS.</p><h1>Do seu vídeo<br>ao <span>Status.</span></h1><p class="lead">Primeira parte de 15, 30, 60 ou 90 segundos.<br>Na ordem certa, com o vídeo inteiro.</p><div class="facts"><span>↗ Até 4 minutos</span><span>◉ Até 200 MB</span><span>⌁ Sem recortar a imagem</span></div></section>
 <section class="workspace" aria-labelledby="prepare-title">
 <div class="panel"><div class="panel-heading"><span class="step">01</span><div><h2 id="prepare-title">Vamos preparar seu vídeo</h2><p>Cole um link público ou envie um arquivo.</p></div></div>
 <form id="access-form" hidden><label for="access">Chave de acesso</label><div class="link-row"><input id="access" type="password" autocomplete="current-password" required placeholder="Chave compartilhada pelo proprietário"><button class="primary" type="submit">Entrar</button></div></form>
 <div id="input-area">
-<fieldset id="first-part-control"><legend>Primeira parte</legend><div class="duration-options"><label><input type="radio" name="first-part" value="60" checked> 60 segundos</label><label><input type="radio" name="first-part" value="30"> 30 segundos</label></div><p class="hint">Vale para link e arquivo. As demais partes têm até 60 s, com o final preservado.</p></fieldset>
+<fieldset id="first-part-control"><legend>Primeira parte</legend><div class="duration-options"><label><input type="radio" name="first-part" value="15"> 15 segundos</label><label><input type="radio" name="first-part" value="30"> 30 segundos</label><label><input type="radio" name="first-part" value="60" checked> 60 segundos</label><label><input type="radio" name="first-part" value="90"> 90 segundos</label></div><p class="hint">Vale para link e arquivo. O restante é dividido em partes iguais de até 90 s, preservando todo o conteúdo.</p></fieldset>
 <form id="link-form"><label for="url">Instagram ou X <span class="muted">· publicação pública</span></label><div class="link-row"><input id="url" type="url" placeholder="https://www.instagram.com/reel/…" required autocomplete="off"><button type="submit" class="secondary" aria-label="Preparar vídeo pelo link">Preparar →</button></div><p class="hint">Links podem ser bloqueados pela plataforma. Se isso acontecer, envie o arquivo. Parâmetros de compartilhamento são removidos automaticamente.</p></form>
 <div class="divider"><span>ou envie um arquivo</span></div>
 <form id="upload-form"><label class="drop" id="drop" for="video-file"><span class="upload-icon" aria-hidden="true">↑</span><strong>Escolher vídeo do aparelho</strong><span id="file-label">MP4, MOV ou outro formato de vídeo</span><input id="video-file" type="file" accept="video/*" required></label><button class="primary wide" id="upload-button" type="submit" disabled>Dividir meu vídeo <span aria-hidden="true">→</span></button></form>
@@ -23,8 +23,8 @@
 <p id="error" class="error" role="alert" hidden></p>
 <section class="results" aria-labelledby="results-title"><div class="results-heading"><h2 id="results-title">Seus vídeos</h2><span id="job-count">0 vídeos</span></div><div id="submission-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden><span class="spinner" aria-hidden="true"></span><span id="submission-message"></span></div><progress id="upload-progress" aria-label="Progresso do envio" max="100" value="0" hidden></progress><p id="empty" class="empty">Seu próximo Status começa aqui.<br><span>Os vídeos preparados aparecerão neste espaço.</span></p><div id="jobs"></div></section>
 <div class="retention"><span aria-hidden="true">◷</span><p>Seus arquivos expiram em <strong>24 horas</strong>. Você também pode excluí-los assim que terminar.</p></div></div>
-<aside class="how"><span class="step">COMO FUNCIONA</span><ol><li><strong>Envie seu vídeo</strong><span>Conteúdo seu ou que você pode usar.</span></li><li><strong>A gente prepara as partes</strong><span>Primeira de 30 ou 60 s; demais de até 60 s.</span></li><li><strong>Baixe e publique em ordem</strong><span>Abra o WhatsApp e selecione as partes.</span></li></ol></aside>
+<aside class="how"><span class="step">COMO FUNCIONA</span><ol><li><strong>Envie seu vídeo</strong><span>Conteúdo seu ou que você pode usar.</span></li><li><strong>A gente prepara as partes</strong><span>Escolha a primeira parte; o restante fica em partes iguais de até 90 s.</span></li><li><strong>Baixe e publique em ordem</strong><span>Abra o WhatsApp e selecione as partes.</span></li></ol></aside>
 </section>
 
-</main><footer><a class="brand small" href="/">instazap</a><p>Feito para compartilhar histórias, com cuidado.<br>Sem publicação automática. Sem senhas de redes sociais.</p><span>60 segundos de cada vez.</span></footer>
+</main><footer><a class="brand small" href="/">instazap</a><p>Feito para compartilhar histórias, com cuidado.<br>Sem publicação automática. Sem senhas de redes sociais.</p><span>Sua história inteira, em partes.</span></footer>
 </body></html>

@@ -36,6 +36,15 @@ class Store:
             if 'first_part_seconds' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute('ALTER TABLE jobs ADD COLUMN first_part_seconds INTEGER NOT NULL DEFAULT 60 '
                            'CHECK(first_part_seconds IN (30,60))')
+            columns = {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}
+            # Keep the legacy column and its CHECK intact; additive snapshot for all four choices.
+            if 'first_part_snapshot' not in columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN first_part_snapshot INTEGER NOT NULL DEFAULT 60 '
+                           'CHECK(first_part_snapshot IN (15,30,60,90))')
+                db.execute('UPDATE jobs SET first_part_snapshot=first_part_seconds')
+            if 'original_duration' not in columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN original_duration REAL '
+                           'CHECK(original_duration > 0 AND original_duration <= 240)')
 
     @contextmanager
     def db(self):
@@ -79,13 +88,18 @@ class Store:
                 raise Busy('Armazenamento ou fila cheia. Exclua arquivos antigos ou tente mais tarde.')
             job_id = secrets.token_hex(16)
             now = time.time()
-            db.execute('INSERT INTO jobs(id,owner,state,created,expires,kind,url,first_part_seconds) VALUES (?,?,?,?,?,?,?,?)',
+            db.execute('INSERT INTO jobs(id,owner,state,created,expires,kind,url,first_part_seconds,first_part_snapshot) VALUES (?,?,?,?,?,?,?,?,?)',
                        (job_id, owner, 'receiving' if kind == 'upload' else 'queued', now,
-                        now + self.settings.ttl, kind, url, first_part_seconds))
+                        now + self.settings.ttl, kind, url, first_part_seconds if first_part_seconds in (30, 60) else 60,
+                        first_part_seconds))
             (self.files / job_id).mkdir(mode=0o700)
         return job_id
 
     def update(self, job_id, **fields):
+        if 'first_part_seconds' in fields:
+            value = validate_first_part(fields.pop('first_part_seconds'))
+            fields['first_part_snapshot'] = value
+            fields['first_part_seconds'] = value if value in (30, 60) else 60
         with self.db() as db:
             db.execute(f'UPDATE jobs SET {",".join(k + "=?" for k in fields)} WHERE id=?',
                        (*fields.values(), job_id))
@@ -94,11 +108,11 @@ class Store:
         with self.db() as db:
             row = db.execute('SELECT * FROM jobs WHERE id=? AND owner=? AND expires>?',
                              (job_id, owner, time.time())).fetchone()
-        return dict(row) if row else None
+        return self.snapshot(row) if row else None
 
     def listing(self, owner):
         with self.db() as db:
-            return [dict(r) for r in db.execute('SELECT * FROM jobs WHERE owner=? AND expires>? ORDER BY created DESC',
+            return [self.snapshot(r) for r in db.execute('SELECT * FROM jobs WHERE owner=? AND expires>? ORDER BY created DESC',
                                                (owner, time.time()))]
 
     def claim(self):
@@ -108,7 +122,7 @@ class Store:
                              (time.time(),)).fetchone()
             if row:
                 db.execute("UPDATE jobs SET state='processing', progress=5 WHERE id=?", (row['id'],))
-                return dict(row)
+                return self.snapshot(row)
 
     def remove(self, job_id):
         # Worker deletion is serialized by caller; access disappears before filesystem removal.
@@ -141,6 +155,12 @@ class Store:
             if folder.name not in known:
                 shutil.rmtree(folder, ignore_errors=True)
         self.cleanup()
+
+    @staticmethod
+    def snapshot(row):
+        job = dict(row)
+        job['first_part_seconds'] = job.pop('first_part_snapshot')
+        return job
 
     @staticmethod
     def public(job):

@@ -474,7 +474,7 @@ footer>span {
     padding-right:450px
   }
   .intro:after {
-    content:"60";
+    content:"90";
     position:absolute;
     right:90px;
     top:16px;
@@ -486,7 +486,7 @@ footer>span {
     pointer-events:none
   }
   .intro:before {
-    content:"SEGUNDOS / PARTE";
+    content:"SEGUNDOS / NO MÁXIMO";
     position:absolute;
     right:90px;
     top:230px;
