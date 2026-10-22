@@ -37,7 +37,11 @@ def test_parent_death_does_not_leave_orphan_worker(tmp_path):
         parent.wait(timeout=5)
         for _ in range(200):
             status = Path(f'/proc/{child_pid}/stat')
-            if not status.exists() or status.read_text().split()[2] == 'Z':
+            try:
+                state = status.read_text().split()[2]
+            except FileNotFoundError:
+                break  # The child exited before or during the read.
+            if state == 'Z':
                 break
             time.sleep(.01)
         else:
